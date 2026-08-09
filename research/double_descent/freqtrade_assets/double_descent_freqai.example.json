@@ -1,0 +1,90 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "max_open_trades": 1,
+  "stake_currency": "USDT",
+  "stake_amount": 100,
+  "tradable_balance_ratio": 1,
+  "fiat_display_currency": "USD",
+  "dry_run": true,
+  "dry_run_wallet": 1000,
+  "timeframe": "1h",
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "BTC/USDT:USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "freqai": {
+    "enabled": true,
+    "purge_old_models": 2,
+    "train_period_days": 60,
+    "backtest_period_days": 7,
+    "save_backtest_models": false,
+    "live_retrain_hours": 0,
+    "identifier": "double-descent-template",
+    "feature_parameters": {
+      "include_timeframes": [
+        "1h"
+      ],
+      "include_corr_pairlist": [],
+      "label_period_candles": 1,
+      "include_shifted_candles": 0,
+      "DI_threshold": 0,
+      "weight_factor": 0,
+      "principal_component_analysis": false,
+      "use_SVM_to_remove_outliers": false,
+      "indicator_periods_candles": [
+        14
+      ],
+      "plot_feature_importances": 0
+    },
+    "data_split_parameters": {
+      "test_size": 0,
+      "shuffle": false
+    },
+    "model_training_parameters": {
+      "mode": "rff",
+      "n_random_features": 4096,
+      "gamma": 0.5,
+      "ridge_lambda": 0.000001,
+      "seed": 1,
+      "chunk_size": 4096,
+      "device": "cuda",
+      "feature_dtype": "float32",
+      "accumulator_dtype": "float32",
+      "pinv_rtol": 0.000001,
+      "compute_diagnostics": false
+    }
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": false
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": false
+  },
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "unit": "minutes"
+  },
+  "bot_name": "double-descent-research",
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
