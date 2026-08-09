@@ -1,254 +1,247 @@
 # Double Descent in Trading — Freqtrade/FreqAI Experiment
 
-This research module tests whether return prediction exhibits **double descent / benign overfitting** as the number of Random Fourier Features (`P`) crosses and greatly exceeds the number of training observations (`N`).
+This module tests whether return prediction exhibits **double descent / benign overfitting** as Random Fourier Feature width (`P`) crosses and greatly exceeds the number of training observations (`N`).
 
-The module is designed as a **replication + extension experiment**, not as a claim that the included strategy is profitable.
+It is a **replication + extension research experiment**, not a claim that the included trading strategy is profitable.
 
 ## Research questions
 
-1. Does out-of-sample prediction error deteriorate near `P / N ~= 1` and improve again for `P >> N`?
-2. Does the same pattern appear in Freqtrade trading metrics after fees and realistic execution assumptions?
-3. Is any second descent robust across random seeds and rolling windows?
-4. Does finite-width RFF performance converge toward the exact RBF-kernel (`P -> infinity`) limit?
-5. Does the effect survive longer training windows, which reduces the chance that the model is merely acting like a recency/momentum rule?
+1. Does true out-of-sample prediction error worsen around `P / N ~= 1` and improve for `P >> N`?
+2. Does prediction IC / R² show the same complexity curve?
+3. Does any second descent survive Freqtrade fees and execution assumptions?
+4. Is it robust across seeds, rolling windows, training-window sizes and another asset?
+5. Do finite RFF models converge toward the exact RBF-kernel (`P -> infinity`) limit?
 
-## Why this lives under `research/`
+## Important design choices
 
-Freqtrade intentionally ignores most files under `user_data`. The canonical experiment therefore stays in this tracked directory. Run the installer to copy the FreqAI model, strategy and example config into your local `user_data` directory.
+### Prediction quality and trading quality are separate
 
-## Components
+The custom FreqAI model records true OOS metrics for every rolling prediction window **after inference**:
 
-- `rff_core.py` — streamed finite-width Random Fourier Feature ridge/minimum-norm regression plus exact RBF-kernel limit.
-- `synthetic_double_descent.py` — sanity check on synthetic data before touching markets.
-- `plot_sweep.py` — plots metric vs `P/N` on a logarithmic x-axis.
-- `run_freqtrade_sweep.py` — launches repeatable Freqtrade/FreqAI backtests over a `P x seed` grid.
-- `freqtrade_assets/DoubleDescentRFFRegressor.py` — custom FreqAI model.
-- `freqtrade_assets/DoubleDescentFreqaiStrategy.py` — intentionally simple long/short strategy.
-- `freqtrade_assets/double_descent_freqai.example.json` — starting configuration for BTC/USDT perpetual 1h experiments.
-- `tests/` — deterministic RFF and kernel-limit checks.
+- MSE / MAE
+- R²
+- prediction-vs-realized correlation (IC)
+- directional accuracy
 
-## Important implementation property
+The future target is used only for diagnostics after the prediction exists. It is never used by the strategy's entry/exit rules.
 
-The custom model does **not** create one million pandas columns.
+`run_freqtrade_sweep.py` aggregates the per-window sufficient statistics into `summary.csv`. Trading results remain Freqtrade's independent second layer.
 
-For finite RFF width `P`, it generates feature chunks on GPU and accumulates the `N x N` Gram matrix:
+### Hybrid primal / dual solver
+
+For `P <= N`, the model uses an explicit `N x P` RFF matrix and solves in **primal** space. This avoids an unnecessary `N x N` solve for small models.
+
+For `P > N`, RFF chunks are streamed into the **dual** `N x N` Gram matrix. The full `N x P` matrix is never materialized.
 
 ```text
-base market features (N x d)
-        |
-        v
-RFF chunk (N x chunk_size)
-        |
-        v
-K += Z_chunk @ Z_chunk.T
-        |
-        v
-next RFF chunk
+P <= N                              P > N
+
+X -> RFF Z (N x P)                 X -> RFF chunk
+        |                                  |
+        v                                  v
+ solve P x P                         K += Zc @ Zc.T
+        |                                  |
+        v                                  v
+     beta                              solve N x N
 ```
 
-Memory therefore scales primarily with `N^2` plus one feature chunk, rather than `N x P`.
+### RFF widths are genuinely nested
 
-The exact implementation cost is `O(N^2 P)`. For very large `N`, use the RBF-kernel-limit mode as the `P -> infinity` reference and reserve explicit 250k/500k/1m-feature runs for selected windows.
+For fixed seed, chunk size, gamma and preprocessing, a smaller `P` uses an exact prefix of a larger `P` feature map. RNG is consumed in fixed-size blocks even for a partial final chunk. This avoids changing earlier RFF biases merely because `P` changed.
 
-## 1. Install Freqtrade and GPU dependencies
+### Numerical policy
 
-Follow Freqtrade's normal installation instructions with FreqAI enabled. PyTorch is required by this experiment. On an NVIDIA machine install the CUDA-enabled PyTorch build matching your driver/toolkit rather than a CPU-only wheel.
+- `ridge_lambda > 0`: Cholesky solve with fallback.
+- `ridge_lambda = 0`, `P <= N`: SVD pseudoinverse on `Z`, avoiding squared conditioning near interpolation.
+- `ridge_lambda = 0`, `P > N`: Hermitian pseudoinverse in dual space.
+- `float64` coefficients stay `float64`.
+- default `matmul_precision=highest` prioritizes numerical integrity. Use `high` only for exploratory timing and confirm sensitive points again with `highest`.
 
-From the repository root, install plotting/test extras for this research module:
+## Files
+
+- `rff_core.py` — standalone hybrid RFF / exact RBF-kernel implementation.
+- `benchmark_rff.py` — measures fit/predict time and peak CUDA allocation locally.
+- `synthetic_double_descent.py` — classical synthetic double-descent sanity check.
+- `run_freqtrade_sweep.py` — resumable Freqtrade/FreqAI `P x seed` runner with OOS aggregation.
+- `plot_sweep.py` — plots synthetic or market metrics against `P/N` with confidence bands.
+- `freqtrade_assets/DoubleDescentRFFRegressor.py` — custom FreqAI model.
+- `freqtrade_assets/DoubleDescentFreqaiStrategy.py` — deliberately simple trading layer.
+- `freqtrade_assets/double_descent_freqai.example.json` — BTC/USDT futures 1h starting config.
+- `tests/` — deterministic, nesting, hybrid-solver, precision and kernel-limit tests.
+
+## Recommended execution order
+
+### 1. Install / verify
+
+From repository root:
 
 ```bash
 python -m pip install -r research/double_descent/requirements.txt
-```
-
-Verify CUDA:
-
-```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-## 2. Install the Freqtrade assets
-
-From the Freqtrade repository root:
-
-```bash
-python research/double_descent/install_into_user_data.py
-```
-
-Use `--force` to replace a previous installation:
-
-```bash
 python research/double_descent/install_into_user_data.py --force
 ```
 
-## 3. Synthetic sanity check first
-
-Before using market data, verify that the experiment harness can recover the classical interpolation-region behavior:
+### 2. Tests
 
 ```bash
 cd research/double_descent
-python synthetic_double_descent.py --output results/synthetic.csv
-python plot_sweep.py results/synthetic.csv \
+python -m pytest -q
+cd ../..
+```
+
+All tests must pass before market runs.
+
+### 3. Synthetic sanity check
+
+```bash
+python research/double_descent/synthetic_double_descent.py \
+  --output research/double_descent/results/synthetic.csv
+
+python research/double_descent/plot_sweep.py \
+  research/double_descent/results/synthetic.csv \
   --metric test_mse \
-  --output results/synthetic_double_descent.png \
+  --output research/double_descent/results/synthetic_double_descent.png \
   --title "Synthetic double descent"
 ```
 
-The exact curve varies with seed/noise, but the run should show training error collapsing as model dimension reaches/exceeds the sample size and a pronounced generalization penalty around the interpolation region under suitable noise.
+### 4. Download development data
 
-## 4. Download market data
-
-The example uses Binance futures, BTC/USDT perpetual, 1h candles. Choose a timerange that is available from your exchange/data source.
-
-Example:
+The first market experiment uses BTC/USDT perpetual futures at 1h. Keep **2025 onward untouched** while choosing gamma, `P`, ridge and other methodology.
 
 ```bash
 freqtrade download-data \
   --config user_data/configs/double_descent_freqai.example.json \
   --trading-mode futures \
   --timeframes 1h 5m \
-  --timerange 20190101-20260101
+  --timerange 20191001-20260801
 ```
 
-The 5m data is optional but recommended for `--timeframe-detail 5m` execution validation.
-
-## 5. Smoke test one FreqAI model
-
-Start small:
+### 5. Tiny FreqAI smoke run — discover actual N
 
 ```bash
-freqtrade backtesting \
+python research/double_descent/run_freqtrade_sweep.py \
   --config user_data/configs/double_descent_freqai.example.json \
-  --strategy DoubleDescentFreqaiStrategy \
-  --freqaimodel DoubleDescentRFFRegressor \
-  --timerange 20230101-20240101
+  --timerange 20230101-20230401 \
+  --p-grid 1024 \
+  --seeds 1 \
+  --gamma 0.1 \
+  --ridge 1e-6 \
+  --train-period-days 60 \
+  --backtest-period-days 30 \
+  --experiment-id dd-v2-smoke
 ```
 
-The example strategy uses only a compact, causal market-state feature vector. The huge dimensionality is created *inside the model*, not by duplicating technical indicators in the dataframe.
+Inspect `results/freqtrade/summary.csv`. The fields `n_train_min`, `n_train_median`, `n_train_max`, `p_over_n_median`, OOS MSE/R²/IC and directional accuracy are generated automatically.
 
-## 6. Complexity sweep
+### 6. Benchmark the local GPU
 
-Run a first finite-width sweep:
+Use the measured median `N` and input feature count. Example for `N ~= 1400`, `d ~= 30`:
+
+```bash
+python research/double_descent/benchmark_rff.py \
+  --n-train 1400 \
+  --n-predict 720 \
+  --input-dim 30 \
+  --p-grid 256,1024,1400,4096,16384,65536,100000 \
+  --gamma 0.1 \
+  --ridge 1e-6 \
+  --device cuda \
+  --matmul-precision highest
+```
+
+### 7. Gamma pilot — development data only
+
+Do not tune gamma and complexity simultaneously. Pick roughly `P ~= 2N`, one seed, 30-day backtest windows and compare **OOS MSE/IC**, not trading profit.
+
+Recommended gamma pilot:
+
+```text
+0.05, 0.10, 0.20, 0.50
+```
+
+Freeze gamma before the main complexity sweep.
+
+### 8. Main exploratory complexity sweep
+
+Build `P` from measured `N`, densely around interpolation and logarithmically away from it.
+
+Recommended ratios:
+
+```text
+0.10, 0.25, 0.50, 0.75,
+0.90, 0.95, 0.98, 1.00, 1.02, 1.05, 1.10,
+1.25, 1.50, 2, 3, 5, 10, 25, 50
+```
+
+For `N = 1400`, approximately:
+
+```text
+140,350,700,1050,1260,1330,1372,1400,1428,1470,1540,1750,2100,2800,4200,7000,14000,35000,70000
+```
+
+Example:
 
 ```bash
 python research/double_descent/run_freqtrade_sweep.py \
   --config user_data/configs/double_descent_freqai.example.json \
   --timerange 20200101-20250101 \
-  --p-grid 64,128,256,512,1024,2048,4096,8192,16384,32768,65536 \
-  --seeds 1,2,3,4,5 \
+  --p-grid 140,350,700,1050,1260,1330,1372,1400,1428,1470,1540,1750,2100,2800,4200,7000,14000,35000,70000 \
+  --seeds 1,2,3 \
+  --gamma 0.10 \
+  --ridge 1e-6 \
+  --train-period-days 60 \
+  --backtest-period-days 30 \
   --device cuda \
-  --timeframe-detail 5m
+  --matmul-precision highest \
+  --experiment-id dd-v2-main
 ```
 
-Do **not** start with one million features. First establish whether the curve is interesting around `P/N ~= 1` and through moderate overparameterization. Only then add selected points such as 100k, 250k, 500k and 1m.
+If interrupted, rerun the same command with `--resume`. The runner skips successful runs. It fails fast by default after an error so an invalid setup does not waste an overnight run.
 
-## 7. Kernel-limit run (`P -> infinity`)
-
-Copy the example config and change:
-
-```json
-"model_training_parameters": {
-  "mode": "rbf_kernel_limit",
-  "gamma": 0.5,
-  "ridge_lambda": 0.000001,
-  "device": "cuda"
-}
-```
-
-This evaluates the exact RBF kernel corresponding to the infinite-width limit of the Random Fourier Feature map without explicitly generating millions of features.
-
-## 8. Training-window experiment
-
-The initial example uses 60 training days. Repeat the sweep with at least:
-
-- 15 days
-- 30 days
-- 60 days
-- 120 days
-- 365 days
-
-The important variable is `P / N`, not `P` alone. Each model fit writes `double_descent_diagnostics.jsonl` inside its FreqAI model-data directory, including the actual training-row count and `P/N`.
-
-## 9. Mandatory validation
-
-For candidate strategies run Freqtrade's built-in bias/indicator checks in addition to ordinary backtesting:
+### 9. Plot prediction-space results first
 
 ```bash
-freqtrade lookahead-analysis \
-  --config user_data/configs/double_descent_freqai.example.json \
-  --strategy DoubleDescentFreqaiStrategy \
-  --freqaimodel DoubleDescentRFFRegressor \
-  --timerange 20230101-20240101
+python research/double_descent/plot_sweep.py \
+  results/freqtrade/summary.csv \
+  --metric oos_mse \
+  --output results/freqtrade/oos_mse.png \
+  --title "BTC 1h — OOS MSE vs P/N"
+
+python research/double_descent/plot_sweep.py \
+  results/freqtrade/summary.csv \
+  --metric oos_ic \
+  --output results/freqtrade/oos_ic.png \
+  --title "BTC 1h — OOS IC vs P/N"
 ```
 
-and:
+## After the first curve
 
-```bash
-freqtrade recursive-analysis \
-  --config user_data/configs/double_descent_freqai.example.json \
-  --strategy DoubleDescentFreqaiStrategy \
-  --timerange 20230101-20240101
-```
+Do not automatically run every expensive robustness test. If the first curve is interesting, continue with:
 
-A result that fails leakage/bias checks is invalid regardless of Sharpe or profit.
-
-## 10. Experimental phases
-
-### Phase A — synthetic
-
-Validate the harness and interpolation behavior.
-
-### Phase B — finite RFF on BTC 1h
-
-Sweep `P/N` densely around 1 and then logarithmically into the overparameterized regime. Use at least 5 seeds initially and 20 for final results.
-
-### Phase C — RBF kernel limit
-
-Compare finite RFF widths with the `P -> infinity` reference.
-
-### Phase D — training window robustness
-
-Repeat across multiple `train_period_days` values.
-
-### Phase E — external replication
-
-Freeze the method and repeat on ETH/USDT. Do not tune the method on ETH after seeing the BTC result.
-
-### Phase F — untouched final holdout
-
-Keep the most recent interval fully untouched until feature definitions, gamma selection, ridge handling, signal rules, costs and model-selection procedure are frozen.
-
-## Metrics
-
-Track prediction metrics separately from trading metrics.
-
-Prediction layer:
-
-- out-of-sample MSE
-- out-of-sample R2
-- prediction/realized-return correlation (IC)
-- directional accuracy
-
-Trading layer (Freqtrade):
-
-- net return
-- Sharpe
-- Sortino
-- max drawdown
-- profit factor
-- turnover / trade count
-- long vs short performance
-
-The primary scientific plot is metric vs `log10(P/N)`, with confidence intervals across seeds and a vertical marker at `P/N = 1`.
+1. selected 100k / 250k / 500k / 1m finite-width spot checks;
+2. exact RBF kernel `P -> infinity` reference;
+3. ridgeless (`lambda=0`) sweep, with float64 checks near `P/N=1`;
+4. restore 7-day retraining for selected widths;
+5. 30 / 120-day training-window robustness;
+6. noise-feature and shuffled-target null controls;
+7. Freqtrade `lookahead-analysis` / `recursive-analysis`;
+8. freeze methodology;
+9. ETH external replication;
+10. only then open the untouched 2025+ BTC holdout.
 
 ## Numerical cautions
 
-- Do not use FP16 for the kernel solve near the interpolation threshold.
-- `ridge_lambda=0` uses a pseudoinverse and therefore depends on `pinv_rtol`; report that value in final results.
-- A numerical singularity can look like an interpolation spike. Repeat sensitive points in `float64` before interpreting them scientifically.
-- RFF dimensions are nested only when seed, chunk size, gamma and input preprocessing are held constant.
+- Do not interpret an interpolation spike until nearby points are repeated with `accumulator_dtype=float64` and `matmul_precision=highest`.
+- `pinv_rtol` is an implicit rank threshold and must be reported for ridgeless results.
+- `P` is nominal dimension; collect effective-rank diagnostics for selected widths.
+- A million correlated dimensions are not equivalent to a million independent directions.
 
 ## Research integrity
 
-Do not select the best `P` from the final holdout. Do not hide seeds that perform poorly. Report all planned widths/seeds and distinguish exploratory plots from the frozen final test.
-
-The included strategy is intentionally not optimized for profit. Its job is to expose changes in predictive-model quality to a mature backtesting engine with as little strategy-level confounding as possible.
+- no random train/test split for time series;
+- no final-holdout tuning;
+- no hiding bad seeds;
+- gamma frozen before the main `P` sweep;
+- prediction metrics primary for the double-descent claim;
+- trading metrics are a secondary economic validation;
+- final conclusions include costs, drawdown and regime robustness.
