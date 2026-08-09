@@ -18,6 +18,7 @@ except ImportError as exc:  # pragma: no cover - exercised only in minimal insta
 
 DeviceName = Literal["auto", "cpu", "cuda"]
 ModeName = Literal["rff", "rbf_kernel_limit"]
+MatmulPrecision = Literal["highest", "high", "medium"]
 
 
 @dataclass(slots=True)
@@ -33,6 +34,7 @@ class RFFConfig:
     feature_dtype: str = "float32"
     accumulator_dtype: str = "float32"
     pinv_rtol: float = 1e-6
+    matmul_precision: MatmulPrecision = "highest"
 
     def validate(self) -> None:
         if self.n_random_features <= 0:
@@ -45,6 +47,8 @@ class RFFConfig:
             raise ValueError("chunk_size must be > 0")
         if self.pinv_rtol <= 0:
             raise ValueError("pinv_rtol must be > 0")
+        if self.matmul_precision not in {"highest", "high", "medium"}:
+            raise ValueError("matmul_precision must be highest, high, or medium")
 
 
 @dataclass(slots=True)
@@ -56,6 +60,7 @@ class KernelLimitConfig:
     device: DeviceName = "auto"
     accumulator_dtype: str = "float32"
     pinv_rtol: float = 1e-6
+    matmul_precision: MatmulPrecision = "highest"
 
     def validate(self) -> None:
         if self.gamma <= 0:
@@ -64,6 +69,8 @@ class KernelLimitConfig:
             raise ValueError("ridge_lambda must be >= 0")
         if self.pinv_rtol <= 0:
             raise ValueError("pinv_rtol must be > 0")
+        if self.matmul_precision not in {"highest", "high", "medium"}:
+            raise ValueError("matmul_precision must be highest, high, or medium")
 
 
 def _resolve_device(name: DeviceName) -> torch.device:
@@ -86,6 +93,12 @@ def _resolve_dtype(name: str) -> torch.dtype:
     return mapping[name]
 
 
+def _numpy_dtype(dtype: torch.dtype) -> np.dtype:
+    if dtype == torch.float64:
+        return np.dtype(np.float64)
+    return np.dtype(np.float32)
+
+
 def _to_2d_float_array(x: Any) -> np.ndarray:
     if hasattr(x, "to_numpy"):
         x = x.to_numpy()
@@ -106,29 +119,38 @@ def _to_1d_float_array(y: Any) -> np.ndarray:
     return np.ascontiguousarray(arr)
 
 
-def _solve_kernel_system(
-    kernel: torch.Tensor,
+def _configure_matmul(precision: MatmulPrecision) -> None:
+    torch.set_float32_matmul_precision(precision)
+
+
+def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
+    return (matrix + matrix.T).mul_(0.5)
+
+
+def _solve_psd_system(
+    matrix: torch.Tensor,
     y: torch.Tensor,
     ridge_lambda: float,
     pinv_rtol: float,
 ) -> torch.Tensor:
-    """Solve K alpha = y, using ridge or a Moore-Penrose pseudoinverse.
+    """Solve a symmetric PSD system using Cholesky for ridge, pinv for ridgeless."""
 
-    For lambda=0 the pseudoinverse is intentional: it corresponds to the
-    minimum-norm interpolating/least-squares solution in the feature space.
-    """
-
+    matrix = _symmetrize(matrix)
     if ridge_lambda > 0:
-        eye = torch.eye(kernel.shape[0], dtype=kernel.dtype, device=kernel.device)
-        return torch.linalg.solve(kernel + ridge_lambda * eye, y)
+        regularized = matrix.clone()
+        regularized.diagonal().add_(ridge_lambda)
+        chol, info = torch.linalg.cholesky_ex(regularized)
+        if int(info.max().detach().cpu()) == 0:
+            return torch.cholesky_solve(y[:, None], chol).squeeze(1)
+        return torch.linalg.solve(regularized, y)
 
-    return torch.linalg.pinv(kernel, hermitian=True, rtol=pinv_rtol) @ y
+    return torch.linalg.pinv(matrix, hermitian=True, rtol=pinv_rtol) @ y
 
 
 def _kernel_diagnostics(kernel: torch.Tensor) -> dict[str, float]:
-    """Return effective-rank diagnostics from a symmetric positive semidefinite Gram matrix."""
+    """Return effective-rank diagnostics from a symmetric positive semidefinite matrix."""
 
-    eigvals = torch.linalg.eigvalsh(kernel).clamp_min(0)
+    eigvals = torch.linalg.eigvalsh(_symmetrize(kernel)).clamp_min(0)
     total = eigvals.sum()
     if total <= 0:
         return {
@@ -146,10 +168,7 @@ def _kernel_diagnostics(kernel: torch.Tensor) -> dict[str, float]:
 
     threshold = largest * 1e-12
     nonzero = eigvals[eigvals > threshold]
-    if nonzero.numel() > 0:
-        condition = largest / nonzero.min()
-    else:
-        condition = torch.tensor(float("inf"), device=kernel.device)
+    condition = largest / nonzero.min() if nonzero.numel() else torch.tensor(float("inf"))
 
     return {
         "effective_rank_entropy": float(effective_rank_entropy.detach().cpu()),
@@ -161,9 +180,17 @@ def _kernel_diagnostics(kernel: torch.Tensor) -> dict[str, float]:
 class StreamingRFFRegressor:
     """Minimum-norm / ridge regression on Random Fourier Features.
 
-    The explicit N x P feature matrix is never retained. Instead, feature chunks
-    are generated deterministically on the selected device and accumulated into
-    the N x N Gram matrix.
+    For P <= N the implementation uses an explicit N x P feature matrix and a
+    primal solve. This avoids constructing/solving an unnecessarily large N x N
+    system for small models.
+
+    For P > N, feature chunks are streamed into the N x N dual Gram matrix, so
+    memory scales with N^2 rather than N x P.
+
+    Random features are generated in fixed-size RNG blocks. The final block is
+    generated at full chunk_size and sliced. This is intentional: with a fixed
+    seed/chunk_size/gamma, the feature set for smaller P is an exact prefix of the
+    feature set for larger P, even when P is not a multiple of chunk_size.
     """
 
     def __init__(self, config: RFFConfig, *, compute_diagnostics: bool = False) -> None:
@@ -172,6 +199,8 @@ class StreamingRFFRegressor:
         self.compute_diagnostics = compute_diagnostics
         self.train_x_: np.ndarray | None = None
         self.alpha_: np.ndarray | None = None
+        self.coef_: np.ndarray | None = None
+        self.solver_space_: str | None = None
         self.diagnostics_: dict[str, Any] = {}
 
     def _feature_chunks(self, x: torch.Tensor):
@@ -187,25 +216,45 @@ class StreamingRFFRegressor:
         produced = 0
         while produced < p:
             width = min(cfg.chunk_size, p - produced)
-            omega = torch.randn(
-                (width, d),
+            omega_full = torch.randn(
+                (cfg.chunk_size, d),
                 generator=generator,
                 device=x.device,
                 dtype=feature_dtype,
             )
-            omega.mul_(omega_scale)
-            bias = torch.rand(
-                (width,),
+            omega_full.mul_(omega_scale)
+            bias_full = torch.rand(
+                (cfg.chunk_size,),
                 generator=generator,
                 device=x.device,
                 dtype=feature_dtype,
             )
-            bias.mul_(2.0 * math.pi)
+            bias_full.mul_(2.0 * math.pi)
 
-            z = torch.cos(x.to(feature_dtype) @ omega.T + bias)
+            omega = omega_full[:width]
+            bias = bias_full[:width]
+            z = torch.cos(x @ omega.T + bias)
             z.mul_(scale)
             yield z
             produced += width
+
+    def _explicit_features(self, x: np.ndarray) -> torch.Tensor:
+        device = _resolve_device(self.config.device)
+        feature_dtype = _resolve_dtype(self.config.feature_dtype)
+        x_t = torch.as_tensor(x, dtype=feature_dtype, device=device)
+        chunks = list(self._feature_chunks(x_t))
+        return torch.cat(chunks, dim=1)
+
+    def _dual_gram(self, x: np.ndarray) -> torch.Tensor:
+        device = _resolve_device(self.config.device)
+        acc_dtype = _resolve_dtype(self.config.accumulator_dtype)
+        feature_dtype = _resolve_dtype(self.config.feature_dtype)
+        x_t = torch.as_tensor(x, dtype=feature_dtype, device=device)
+        gram = torch.zeros((len(x), len(x)), dtype=acc_dtype, device=device)
+        for z in self._feature_chunks(x_t):
+            z_acc = z if z.dtype == acc_dtype else z.to(acc_dtype)
+            gram.addmm_(z_acc, z_acc.T)
+        return gram
 
     def _cross_kernel(self, left: np.ndarray, right: np.ndarray) -> torch.Tensor:
         device = _resolve_device(self.config.device)
@@ -226,24 +275,26 @@ class StreamingRFFRegressor:
         produced = 0
         while produced < p:
             width = min(cfg.chunk_size, p - produced)
-            omega = torch.randn(
-                (width, d),
+            omega_full = torch.randn(
+                (cfg.chunk_size, d),
                 generator=generator,
                 device=device,
                 dtype=feature_dtype,
-            )
-            omega.mul_(omega_scale)
-            bias = torch.rand(
-                (width,),
+            ).mul_(omega_scale)
+            bias_full = torch.rand(
+                (cfg.chunk_size,),
                 generator=generator,
                 device=device,
                 dtype=feature_dtype,
-            )
-            bias.mul_(2.0 * math.pi)
+            ).mul_(2.0 * math.pi)
+            omega = omega_full[:width]
+            bias = bias_full[:width]
 
             z_left = torch.cos(left_t @ omega.T + bias).mul_(scale)
             z_right = torch.cos(right_t @ omega.T + bias).mul_(scale)
-            out.addmm_(z_left.to(acc_dtype), z_right.to(acc_dtype).T)
+            z_left_acc = z_left if z_left.dtype == acc_dtype else z_left.to(acc_dtype)
+            z_right_acc = z_right if z_right.dtype == acc_dtype else z_right.to(acc_dtype)
+            out.addmm_(z_left_acc, z_right_acc.T)
             produced += width
 
         return out
@@ -254,53 +305,92 @@ class StreamingRFFRegressor:
         if x_np.shape[0] != y_np.shape[0]:
             raise ValueError("X and y contain different numbers of rows")
 
+        _configure_matmul(self.config.matmul_precision)
         device = _resolve_device(self.config.device)
         acc_dtype = _resolve_dtype(self.config.accumulator_dtype)
-        feature_dtype = _resolve_dtype(self.config.feature_dtype)
-        x_t = torch.as_tensor(x_np, dtype=feature_dtype, device=device)
         y_t = torch.as_tensor(y_np, dtype=acc_dtype, device=device)
-
         n = x_np.shape[0]
-        gram = torch.zeros((n, n), dtype=acc_dtype, device=device)
-        for z in self._feature_chunks(x_t):
-            gram.addmm_(z.to(acc_dtype), z.to(acc_dtype).T)
+        p = self.config.n_random_features
 
-        alpha = _solve_kernel_system(
-            gram,
-            y_t,
-            ridge_lambda=self.config.ridge_lambda,
-            pinv_rtol=self.config.pinv_rtol,
-        )
+        self.train_x_ = None
+        self.alpha_ = None
+        self.coef_ = None
 
-        self.train_x_ = x_np
-        self.alpha_ = alpha.detach().cpu().numpy().astype(np.float32, copy=False)
-        fitted = gram @ alpha
+        if p <= n:
+            z = self._explicit_features(x_np)
+            z_acc = z if z.dtype == acc_dtype else z.to(acc_dtype)
+            if self.config.ridge_lambda > 0:
+                normal = z_acc.T @ z_acc
+                rhs = z_acc.T @ y_t
+                coef = _solve_psd_system(
+                    normal,
+                    rhs,
+                    ridge_lambda=self.config.ridge_lambda,
+                    pinv_rtol=self.config.pinv_rtol,
+                )
+            else:
+                coef = torch.linalg.pinv(z_acc, rtol=self.config.pinv_rtol) @ y_t
+
+            fitted = z_acc @ coef
+            self.coef_ = coef.detach().cpu().numpy().astype(_numpy_dtype(acc_dtype), copy=False)
+            self.solver_space_ = "primal"
+            diagnostic_matrix = z_acc.T @ z_acc if self.compute_diagnostics else None
+        else:
+            gram = self._dual_gram(x_np)
+            alpha = _solve_psd_system(
+                gram,
+                y_t,
+                ridge_lambda=self.config.ridge_lambda,
+                pinv_rtol=self.config.pinv_rtol,
+            )
+            fitted = gram @ alpha
+            self.train_x_ = x_np
+            self.alpha_ = alpha.detach().cpu().numpy().astype(_numpy_dtype(acc_dtype), copy=False)
+            self.solver_space_ = "dual"
+            diagnostic_matrix = gram if self.compute_diagnostics else None
+
         train_mse = torch.mean((fitted - y_t) ** 2)
-
         diagnostics: dict[str, Any] = {
             "mode": "rff",
+            "solver_space": self.solver_space_,
             "n_samples": int(n),
             "n_input_features": int(x_np.shape[1]),
-            "n_random_features": int(self.config.n_random_features),
-            "p_over_n": float(self.config.n_random_features / n),
+            "n_random_features": int(p),
+            "p_over_n": float(p / n),
             "train_mse": float(train_mse.detach().cpu()),
             "device": str(device),
             "ridge_lambda": float(self.config.ridge_lambda),
             "gamma": float(self.config.gamma),
             "seed": int(self.config.seed),
+            "feature_dtype": self.config.feature_dtype,
+            "accumulator_dtype": self.config.accumulator_dtype,
+            "matmul_precision": self.config.matmul_precision,
         }
-        if self.compute_diagnostics:
-            diagnostics.update(_kernel_diagnostics(gram))
+        if diagnostic_matrix is not None:
+            diagnostics.update(_kernel_diagnostics(diagnostic_matrix))
         self.diagnostics_ = diagnostics
         return self
 
     def predict(self, x: Any) -> np.ndarray:
-        if self.train_x_ is None or self.alpha_ is None:
+        if self.solver_space_ is None:
             raise RuntimeError("Model must be fitted before predict()")
         x_np = _to_2d_float_array(x)
-        kernel = self._cross_kernel(x_np, self.train_x_)
-        alpha = torch.as_tensor(self.alpha_, dtype=kernel.dtype, device=kernel.device)
-        pred = kernel @ alpha
+        acc_dtype = _resolve_dtype(self.config.accumulator_dtype)
+
+        if self.solver_space_ == "primal":
+            if self.coef_ is None:
+                raise RuntimeError("Primal coefficient state is missing")
+            z = self._explicit_features(x_np)
+            z_acc = z if z.dtype == acc_dtype else z.to(acc_dtype)
+            coef = torch.as_tensor(self.coef_, dtype=acc_dtype, device=z.device)
+            pred = z_acc @ coef
+        else:
+            if self.train_x_ is None or self.alpha_ is None:
+                raise RuntimeError("Dual estimator state is missing")
+            kernel = self._cross_kernel(x_np, self.train_x_)
+            alpha = torch.as_tensor(self.alpha_, dtype=kernel.dtype, device=kernel.device)
+            pred = kernel @ alpha
+
         return pred.detach().cpu().numpy().reshape(-1)
 
     def save_diagnostics(self, path: str | Path) -> None:
@@ -321,6 +411,7 @@ class RBFKernelLimitRegressor:
         self.diagnostics_: dict[str, Any] = {}
 
     def _rbf_kernel(self, left: np.ndarray, right: np.ndarray) -> torch.Tensor:
+        _configure_matmul(self.config.matmul_precision)
         device = _resolve_device(self.config.device)
         dtype = _resolve_dtype(self.config.accumulator_dtype)
         left_t = torch.as_tensor(left, dtype=dtype, device=device)
@@ -338,7 +429,7 @@ class RBFKernelLimitRegressor:
 
         kernel = self._rbf_kernel(x_np, x_np)
         y_t = torch.as_tensor(y_np, dtype=kernel.dtype, device=kernel.device)
-        alpha = _solve_kernel_system(
+        alpha = _solve_psd_system(
             kernel,
             y_t,
             ridge_lambda=self.config.ridge_lambda,
@@ -346,11 +437,12 @@ class RBFKernelLimitRegressor:
         )
 
         self.train_x_ = x_np
-        self.alpha_ = alpha.detach().cpu().numpy().astype(np.float32, copy=False)
+        self.alpha_ = alpha.detach().cpu().numpy().astype(_numpy_dtype(kernel.dtype), copy=False)
         fitted = kernel @ alpha
         train_mse = torch.mean((fitted - y_t) ** 2)
         diagnostics: dict[str, Any] = {
             "mode": "rbf_kernel_limit",
+            "solver_space": "dual",
             "n_samples": int(x_np.shape[0]),
             "n_input_features": int(x_np.shape[1]),
             "n_random_features": None,
@@ -359,6 +451,8 @@ class RBFKernelLimitRegressor:
             "device": str(kernel.device),
             "ridge_lambda": float(self.config.ridge_lambda),
             "gamma": float(self.config.gamma),
+            "accumulator_dtype": self.config.accumulator_dtype,
+            "matmul_precision": self.config.matmul_precision,
         }
         if self.compute_diagnostics:
             diagnostics.update(_kernel_diagnostics(kernel))
