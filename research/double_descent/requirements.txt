@@ -1,0 +1,5 @@
+# Freqtrade's freqai extra already provides numpy/pandas/scikit-learn.
+# Install a CUDA-enabled torch build appropriate for your system separately.
+matplotlib>=3.8
+pandas>=2.2
+pytest>=8
