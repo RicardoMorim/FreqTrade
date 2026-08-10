@@ -64,3 +64,44 @@ tests, and gate definition are sufficient to reproduce it.
 Passing Phase 1 establishes only that the machinery can detect a known synthetic effect. It is not
 evidence that financial returns exhibit double descent, predictability, or profitability. Phase 2
 benchmarks computational limits; Phase 3 measures the real rolling-window sample size in FreqAI.
+
+## Phase 2: computational benchmark
+
+Phase 2 benchmarks nested RFF generation, minimum-norm fitting, inference, and peak process RAM on
+the available machine. Every case runs in a fresh subprocess so the parent can sample actual
+process-tree resident memory rather than relying only on theoretical array sizes.
+
+Two solver paths are compared:
+
+1. `primal_svd` materializes the design matrix and directly solves the least-squares problem;
+2. `streamed_dual` builds the sample-space Gram matrix in deterministic feature chunks, then makes
+   a second streamed pass for inference.
+
+The dual path has bounded feature memory and is intended for `P >> N`. A shared case at `P=4096`
+checks that both implementations produce the same predictions. The default grid then extends the
+streamed path to one million features. This benchmark uses a fixed synthetic workload with
+`N_train=128`; Phase 3 must measure real FreqAI `N` before these timings are extrapolated to market
+experiments, because dual computation grows quadratically with `N`.
+
+### Predeclared gate
+
+The CPU benchmark passes only if:
+
+1. every isolated subprocess succeeds and returns finite predictions;
+2. the largest requested feature count completes;
+3. peak process RAM stays below 50% of installed memory;
+4. primal and streamed-dual predictions agree in their overlap case;
+5. streamed peak RAM is below the memory required to materialize the largest full design matrix.
+
+### Run
+
+From the repository root:
+
+```powershell
+python scripts/run_double_descent_phase2.py
+```
+
+Artifacts are written to `user_data/research_results/double_descent/phase2/`. The command exits
+non-zero when the gate fails. GPU availability and CUDA-capable Python backends are recorded
+separately; a physically present GPU is not reported as benchmarked unless computation actually
+uses it.
