@@ -112,3 +112,35 @@ non-zero when the gate fails. The runner discovers a CUDA-enabled `python3` inst
 the GPU grid automatically. Use `--cuda-python PATH` to select one explicitly or `--no-cuda` for a
 CPU-only reproduction. A physically present GPU is never reported as benchmarked unless a CUDA
 worker actually completes and exposes tracked VRAM.
+
+## Phase 3: effective rolling-window sample size
+
+Phase 3 runs a measurement-only strategy through the genuine FreqAI rolling-training path on
+Binance BTC/USDT perpetual futures. It freezes a causal 25-variable market-state vector and records
+the raw and final matrix dimensions passed to a dummy mean regressor. No trading signals are
+generated and no predictive-performance claim is made.
+
+The completed 2025 development run observed 13 windows at each requested history length:
+
+| Training period | Effective N |
+| ---: | ---: |
+| 30 days | 719 |
+| 60 days | 1,439 |
+| 90 days | 2,159 |
+| 180 days | 4,319 |
+| 365 days | 8,759 |
+
+All Phase 3 gates passed, including real-data coverage, subprocess success, finite matrices,
+stable feature dimension, and unique chronological windows. See [PHASE3_RESULTS.md](PHASE3_RESULTS.md)
+for the audit and the P/N grids derived from these measurements.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase3.py `
+  --data-dir user_data\data\binance
+```
+
+Artifacts are written to `user_data/research_results/double_descent/phase3/`. The command exits
+non-zero if data are absent, a Freqtrade subprocess does not produce measurements, or any sample
+integrity gate fails.
