@@ -26,7 +26,7 @@ from numpy.typing import NDArray
 
 
 FloatArray = NDArray[np.float64]
-SolverName = Literal["primal_svd", "streamed_dual"]
+SolverName = Literal["primal_svd", "streamed_dual", "torch_cuda_dual"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,15 @@ DEFAULT_CASES = (
     BenchmarkCase(1_000_000, "streamed_dual"),
 )
 
+DEFAULT_CUDA_CASES = (
+    BenchmarkCase(4_096, "torch_cuda_dual"),
+    BenchmarkCase(10_000, "torch_cuda_dual"),
+    BenchmarkCase(100_000, "torch_cuda_dual"),
+    BenchmarkCase(250_000, "torch_cuda_dual"),
+    BenchmarkCase(500_000, "torch_cuda_dual"),
+    BenchmarkCase(1_000_000, "torch_cuda_dual"),
+)
+
 
 @dataclass(frozen=True)
 class Phase2Config:
@@ -64,6 +73,8 @@ class Phase2Config:
     memory_sample_interval_seconds: float = 0.01
     maximum_ram_fraction: float = 0.50
     overlap_relative_tolerance: float = 1e-6
+    cuda_python_executable: str | None = None
+    maximum_vram_fraction: float = 0.90
 
     def validate(self) -> None:
         if self.n_train < 16 or self.n_inference < 1:
@@ -74,14 +85,20 @@ class Phase2Config:
             raise ValueError("at least one benchmark case is required")
         if any(case.feature_count < 1 for case in self.cases):
             raise ValueError("feature counts must be positive")
-        if any(case.solver not in {"primal_svd", "streamed_dual"} for case in self.cases):
-            raise ValueError("solver must be primal_svd or streamed_dual")
+        valid_solvers = {"primal_svd", "streamed_dual", "torch_cuda_dual"}
+        if any(case.solver not in valid_solvers for case in self.cases):
+            raise ValueError("unknown benchmark solver")
+        if any(case.solver == "torch_cuda_dual" for case in self.cases):
+            if not self.cuda_python_executable:
+                raise ValueError("cuda_python_executable is required for CUDA cases")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         if self.dtype not in {"float32", "float64"}:
             raise ValueError("dtype must be float32 or float64")
         if not 0 < self.maximum_ram_fraction <= 1:
             raise ValueError("maximum_ram_fraction must be in (0, 1]")
+        if not 0 < self.maximum_vram_fraction <= 1:
+            raise ValueError("maximum_vram_fraction must be in (0, 1]")
 
 
 @dataclass(frozen=True)
@@ -95,6 +112,11 @@ class BenchmarkDataset:
 
 def _dtype(name: str) -> np.dtype[Any]:
     return np.dtype(name)
+
+
+def _effective_rcond(config: Phase2Config) -> float:
+    numerical_floor = np.finfo(_dtype(config.dtype)).eps * config.n_train
+    return max(config.rcond, float(numerical_floor))
 
 
 def _package_version(package: str) -> str | None:
@@ -217,7 +239,7 @@ def solve_primal(
     centered_target = dataset.train_target - target_mean
     solver_started = time.perf_counter()
     coefficients, _, rank, singular_values = np.linalg.lstsq(
-        centered_train, centered_target, rcond=config.rcond
+        centered_train, centered_target, rcond=_effective_rcond(config)
     )
     solver_seconds = time.perf_counter() - solver_started
     train_prediction = target_mean + centered_train @ coefficients
@@ -273,7 +295,8 @@ def solve_streamed_dual(
         gram += centered_chunk @ centered_chunk.T
         algebra_seconds += time.perf_counter() - algebra_started
     solve_started = time.perf_counter()
-    alpha, _, rank, _ = np.linalg.lstsq(gram, centered_target, rcond=config.rcond)
+    effective_rcond = _effective_rcond(config)
+    alpha, _, rank, _ = np.linalg.lstsq(gram, centered_target, rcond=effective_rcond)
     algebra_seconds += time.perf_counter() - solve_started
     training_total_seconds = time.perf_counter() - training_started
     train_prediction = target_mean + gram @ alpha
@@ -307,7 +330,7 @@ def solve_streamed_dual(
     inference_seconds = time.perf_counter() - inference_started
 
     eigenvalues = np.linalg.eigvalsh(gram).astype(np.float64)
-    positive = eigenvalues[eigenvalues > np.max(eigenvalues) * config.rcond]
+    positive = eigenvalues[eigenvalues > np.max(eigenvalues) * effective_rcond]
     singular_values = np.sqrt(positive[::-1])
     condition_number, effective_rank = _spectral_diagnostics_from_singular_values(
         singular_values, singular_values.size
@@ -327,6 +350,165 @@ def solve_streamed_dual(
     }
 
 
+def solve_torch_cuda_dual(
+    dataset: BenchmarkDataset,
+    case: BenchmarkCase,
+    config: Phase2Config,
+) -> dict[str, Any]:
+    """Fit a streamed sample-space model on CUDA using the same nested RFF stream."""
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("torch CUDA backend is not available in the worker interpreter")
+
+    device = torch.device("cuda:0")
+    torch_dtype = torch.float64 if config.dtype == "float64" else torch.float32
+    numpy_dtype = _dtype(config.dtype)
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    transfer_started = time.perf_counter()
+    train_inputs = torch.as_tensor(dataset.train_inputs, dtype=torch_dtype, device=device)
+    inference_inputs = torch.as_tensor(
+        dataset.inference_inputs, dtype=torch_dtype, device=device
+    )
+    train_target = torch.as_tensor(dataset.train_target, dtype=torch_dtype, device=device)
+    torch.cuda.synchronize(device)
+    device_transfer_seconds = time.perf_counter() - transfer_started
+
+    target_mean = torch.mean(train_target)
+    centered_target = train_target - target_mean
+    gram = torch.zeros(
+        (config.n_train, config.n_train), dtype=torch_dtype, device=device
+    )
+    generation_events = []
+    algebra_events = []
+    training_started = time.perf_counter()
+    for weights, phases in iter_rff_parameter_chunks(
+        config.input_dimension,
+        case.feature_count,
+        config.chunk_size,
+        config.gamma,
+        dataset.rff_seed,
+        numpy_dtype,
+    ):
+        generation_start = torch.cuda.Event(enable_timing=True)
+        generation_end = torch.cuda.Event(enable_timing=True)
+        generation_start.record()
+        weight_tensor = torch.as_tensor(weights, dtype=torch_dtype, device=device)
+        phase_tensor = torch.as_tensor(phases, dtype=torch_dtype, device=device)
+        train_chunk = math.sqrt(2.0 / case.feature_count) * torch.cos(
+            train_inputs @ weight_tensor.T + phase_tensor
+        )
+        generation_end.record()
+        generation_events.append((generation_start, generation_end))
+
+        algebra_start = torch.cuda.Event(enable_timing=True)
+        algebra_end = torch.cuda.Event(enable_timing=True)
+        algebra_start.record()
+        centered_chunk = train_chunk - torch.mean(train_chunk, dim=0)
+        gram.addmm_(centered_chunk, centered_chunk.T)
+        algebra_end.record()
+        algebra_events.append((algebra_start, algebra_end))
+
+    solve_start = torch.cuda.Event(enable_timing=True)
+    solve_end = torch.cuda.Event(enable_timing=True)
+    solve_start.record()
+    eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+    eigenvalue_threshold = eigenvalues[-1] * _effective_rcond(config)
+    retained = eigenvalues > eigenvalue_threshold
+    retained_eigenvalues = eigenvalues[retained]
+    retained_eigenvectors = eigenvectors[:, retained]
+    alpha = retained_eigenvectors @ (
+        (retained_eigenvectors.T @ centered_target) / retained_eigenvalues
+    )
+    train_prediction = target_mean + gram @ alpha
+    solve_end.record()
+    algebra_events.append((solve_start, solve_end))
+    torch.cuda.synchronize(device)
+    training_total_seconds = time.perf_counter() - training_started
+    generation_seconds = sum(
+        start.elapsed_time(end) for start, end in generation_events
+    ) / 1000.0
+    algebra_seconds = sum(start.elapsed_time(end) for start, end in algebra_events) / 1000.0
+
+    inference_generation_events = []
+    inference_prediction = torch.full(
+        (config.n_inference,),
+        float(target_mean.item()),
+        dtype=torch_dtype,
+        device=device,
+    )
+    coefficient_squared_norm = torch.zeros((), dtype=torch_dtype, device=device)
+    inference_started = time.perf_counter()
+    for weights, phases in iter_rff_parameter_chunks(
+        config.input_dimension,
+        case.feature_count,
+        config.chunk_size,
+        config.gamma,
+        dataset.rff_seed,
+        numpy_dtype,
+    ):
+        generation_start = torch.cuda.Event(enable_timing=True)
+        generation_end = torch.cuda.Event(enable_timing=True)
+        generation_start.record()
+        weight_tensor = torch.as_tensor(weights, dtype=torch_dtype, device=device)
+        phase_tensor = torch.as_tensor(phases, dtype=torch_dtype, device=device)
+        scale = math.sqrt(2.0 / case.feature_count)
+        train_chunk = scale * torch.cos(train_inputs @ weight_tensor.T + phase_tensor)
+        inference_chunk = scale * torch.cos(
+            inference_inputs @ weight_tensor.T + phase_tensor
+        )
+        generation_end.record()
+        inference_generation_events.append((generation_start, generation_end))
+
+        feature_mean = torch.mean(train_chunk, dim=0)
+        centered_train_chunk = train_chunk - feature_mean
+        centered_inference_chunk = inference_chunk - feature_mean
+        coefficient_chunk = centered_train_chunk.T @ alpha
+        inference_prediction.add_(centered_inference_chunk @ coefficient_chunk)
+        coefficient_squared_norm.add_(coefficient_chunk @ coefficient_chunk)
+
+    torch.cuda.synchronize(device)
+    inference_seconds = time.perf_counter() - inference_started
+    inference_generation_seconds = sum(
+        start.elapsed_time(end) for start, end in inference_generation_events
+    ) / 1000.0
+
+    peak_vram_mib = torch.cuda.max_memory_allocated() / 2**20
+    peak_vram_reserved_mib = torch.cuda.max_memory_reserved() / 2**20
+    singular_values = torch.sqrt(torch.flip(retained_eigenvalues, dims=(0,)))
+    singular_values_numpy = singular_values.detach().cpu().numpy().astype(np.float64)
+    rank = int(retained_eigenvalues.numel())
+    condition_number, effective_rank = _spectral_diagnostics_from_singular_values(
+        singular_values_numpy, rank
+    )
+    device_properties = torch.cuda.get_device_properties(0)
+    return {
+        "train_prediction": train_prediction.detach().cpu().numpy(),
+        "inference_prediction": inference_prediction.detach().cpu().numpy(),
+        "rank": rank,
+        "condition_number": condition_number,
+        "effective_rank": effective_rank,
+        "coefficient_norm": math.sqrt(float(coefficient_squared_norm.item())),
+        "rff_generation_seconds": generation_seconds,
+        "training_solver_seconds": algebra_seconds,
+        "training_total_seconds": training_total_seconds,
+        "inference_seconds": inference_seconds,
+        "inference_generation_seconds": inference_generation_seconds,
+        "device_transfer_seconds": device_transfer_seconds,
+        "vram_measured": True,
+        "peak_vram_mib": peak_vram_mib,
+        "peak_vram_reserved_mib": peak_vram_reserved_mib,
+        "cuda_device": device_properties.name,
+        "cuda_compute_capability": ".".join(
+            str(value) for value in torch.cuda.get_device_capability(0)
+        ),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+    }
+
+
 def benchmark_case(case: BenchmarkCase, config: Phase2Config) -> dict[str, Any]:
     """Run one benchmark case inside a fresh process."""
     config.validate()
@@ -336,6 +518,8 @@ def benchmark_case(case: BenchmarkCase, config: Phase2Config) -> dict[str, Any]:
         result = solve_primal(dataset, case, config)
     elif case.solver == "streamed_dual":
         result = solve_streamed_dual(dataset, case, config)
+    elif case.solver == "torch_cuda_dual":
+        result = solve_torch_cuda_dual(dataset, case, config)
     else:
         raise ValueError(f"unknown solver: {case.solver}")
     total_compute_seconds = time.perf_counter() - computation_started
@@ -352,7 +536,7 @@ def benchmark_case(case: BenchmarkCase, config: Phase2Config) -> dict[str, Any]:
         "feature_count": case.feature_count,
         "pn_ratio": case.feature_count / config.n_train,
         "solver": case.solver,
-        "backend": "numpy_cpu",
+        "backend": "torch_cuda" if case.solver == "torch_cuda_dual" else "numpy_cpu",
         "dtype": config.dtype,
         "n_train": config.n_train,
         "n_inference": config.n_inference,
@@ -399,8 +583,15 @@ def _process_tree_rss(process: psutil.Process) -> int:
 def run_isolated_case(case: BenchmarkCase, config: Phase2Config) -> dict[str, Any]:
     """Execute one case in a subprocess and sample its process-tree RSS."""
     payload = _encode_worker_payload(case, config)
+    worker_python = (
+        config.cuda_python_executable
+        if case.solver == "torch_cuda_dual"
+        else sys.executable
+    )
+    if not worker_python:
+        raise ValueError("CUDA worker requires cuda_python_executable")
     command = [
-        sys.executable,
+        worker_python,
         "-m",
         "research.double_descent.benchmark",
         "--worker-payload",
@@ -441,14 +632,67 @@ def run_isolated_case(case: BenchmarkCase, config: Phase2Config) -> dict[str, An
             "stderr": stderr.strip(),
             "wall_seconds": wall_seconds,
             "peak_rss_mib": peak_rss / 2**20,
-            "vram_measured": False,
-            "peak_vram_mib": None,
         }
     )
+    if case.solver != "torch_cuda_dual":
+        result.update(
+            {
+                "vram_measured": False,
+                "peak_vram_mib": None,
+                "peak_vram_reserved_mib": None,
+            }
+        )
     return result
 
 
-def hardware_inventory() -> dict[str, Any]:
+def probe_cuda_python(executable: str) -> dict[str, Any] | None:
+    """Return CUDA metadata when an interpreter has a working PyTorch CUDA backend."""
+    probe = (
+        "import json, sys, torch; "
+        "available=torch.cuda.is_available(); "
+        "payload={'python':sys.executable,'torch':torch.__version__,"
+        "'cuda_available':available,'torch_cuda':torch.version.cuda}; "
+        "payload.update({'device':torch.cuda.get_device_name(0),"
+        "'compute_capability':list(torch.cuda.get_device_capability(0)),"
+        "'total_memory_bytes':torch.cuda.get_device_properties(0).total_memory} "
+        "if available else {}); print(json.dumps(payload))"
+    )
+    try:
+        completed = subprocess.run(
+            [executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        result = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    return result if result.get("cuda_available") else None
+
+
+def discover_cuda_python() -> str | None:
+    """Find a Python interpreter with a functioning PyTorch CUDA installation."""
+    candidates = [sys.executable, shutil.which("python3")]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = str(Path(candidate).resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if probe_cuda_python(resolved):
+            return resolved
+    return None
+
+
+def hardware_inventory(cuda_python_executable: str | None = None) -> dict[str, Any]:
     """Describe hardware and distinguish present GPUs from usable Python backends."""
     virtual_memory = psutil.virtual_memory()
     gpu_rows: list[dict[str, Any]] = []
@@ -484,6 +728,9 @@ def hardware_inventory() -> dict[str, Any]:
         except (ImportError, OSError):
             torch_cuda_available = False
     cupy_present = importlib.util.find_spec("cupy") is not None
+    external_cuda = (
+        probe_cuda_python(cuda_python_executable) if cuda_python_executable else None
+    )
     return {
         "platform": platform.platform(),
         "processor": platform.processor(),
@@ -497,8 +744,13 @@ def hardware_inventory() -> dict[str, Any]:
         "torch": torch_version,
         "torch_cuda_available": torch_cuda_available,
         "cupy_present": cupy_present,
-        "cuda_python_backend_available": cupy_present or torch_cuda_available,
-        "vram_measurement": "not_applicable_cpu_backend",
+        "cuda_python": external_cuda,
+        "cuda_python_backend_available": bool(
+            cupy_present or torch_cuda_available or external_cuda
+        ),
+        "vram_measurement": (
+            "torch_cuda_max_memory_allocated" if external_cuda else "not_available"
+        ),
     }
 
 
@@ -515,21 +767,32 @@ def evaluate_benchmark_gate(
     solver_pairs: dict[int, dict[str, dict[str, Any]]] = {}
     for row in successful:
         solver_pairs.setdefault(row["feature_count"], {})[row["solver"]] = row
-    overlaps = [pair for pair in solver_pairs.values() if len(pair) == 2]
-    overlap_checks = []
-    for pair in overlaps:
-        primal = np.asarray(pair["primal_svd"]["prediction_probe"])
-        dual = np.asarray(pair["streamed_dual"]["prediction_probe"])
-        overlap_checks.append(
-            bool(
-                np.allclose(
-                    primal,
-                    dual,
-                    rtol=config.overlap_relative_tolerance,
-                    atol=config.overlap_relative_tolerance,
-                )
+    def predictions_match(
+        left: dict[str, Any], right: dict[str, Any]
+    ) -> bool:
+        return bool(
+            np.allclose(
+                np.asarray(left["prediction_probe"]),
+                np.asarray(right["prediction_probe"]),
+                rtol=config.overlap_relative_tolerance,
+                atol=config.overlap_relative_tolerance,
             )
         )
+
+    cpu_overlap_checks = [
+        predictions_match(pair["primal_svd"], pair["streamed_dual"])
+        for pair in solver_pairs.values()
+        if "primal_svd" in pair and "streamed_dual" in pair
+    ]
+    cuda_overlap_checks = []
+    for pair in solver_pairs.values():
+        if "torch_cuda_dual" not in pair:
+            continue
+        reference = pair.get("streamed_dual") or pair.get("primal_svd")
+        if reference:
+            cuda_overlap_checks.append(
+                predictions_match(reference, pair["torch_cuda_dual"])
+            )
 
     largest_rows = [row for row in successful if row["feature_count"] == completed_maximum]
     largest_streamed = next(
@@ -540,14 +803,41 @@ def evaluate_benchmark_gate(
         and largest_streamed["peak_rss_mib"]
         < largest_streamed["materialized_design_gib"] * 1024
     )
+    cuda_requested = any(case.solver == "torch_cuda_dual" for case in config.cases)
+    cuda_rows = [row for row in successful if row["solver"] == "torch_cuda_dual"]
+    max_peak_vram = max(
+        (row.get("peak_vram_mib", 0.0) for row in cuda_rows), default=0.0
+    )
+    cuda_inventory = hardware.get("cuda_python") or {}
+    vram_total_mib = cuda_inventory.get("total_memory_bytes", 0) / 2**20
+    vram_budget_mib = vram_total_mib * config.maximum_vram_fraction
     checks = {
         "all_cases_succeeded": len(successful) == len(results) == len(config.cases),
         "all_predictions_finite": all_finite,
         "target_maximum_completed": completed_maximum == target_maximum,
         "peak_ram_within_budget": max_peak_rss <= ram_limit_mib,
-        "primal_dual_overlap_matches": bool(overlap_checks) and all(overlap_checks),
+        "primal_dual_overlap_matches": bool(cpu_overlap_checks)
+        and all(cpu_overlap_checks),
         "streaming_memory_is_bounded": streaming_bounded,
     }
+    if cuda_requested:
+        largest_cuda = max(cuda_rows, key=lambda row: row["feature_count"], default=None)
+        checks.update(
+            {
+                "cuda_backend_available": bool(cuda_inventory),
+                "cuda_predictions_match_cpu": bool(cuda_overlap_checks)
+                and all(cuda_overlap_checks),
+                "cuda_vram_measured": bool(cuda_rows)
+                and all(row.get("vram_measured", False) for row in cuda_rows),
+                "cuda_vram_within_budget": bool(vram_budget_mib)
+                and max_peak_vram <= vram_budget_mib,
+                "cuda_streaming_memory_is_bounded": bool(
+                    largest_cuda
+                    and largest_cuda["peak_vram_mib"]
+                    < largest_cuda["materialized_design_gib"] * 1024
+                ),
+            }
+        )
     return {
         "passed": all(checks.values()),
         "checks": checks,
@@ -555,7 +845,10 @@ def evaluate_benchmark_gate(
         "completed_maximum_features": completed_maximum,
         "maximum_peak_rss_mib": max_peak_rss,
         "ram_budget_mib": ram_limit_mib,
-        "overlap_case_count": len(overlap_checks),
+        "overlap_case_count": len(cpu_overlap_checks),
+        "cuda_overlap_case_count": len(cuda_overlap_checks),
+        "maximum_peak_vram_mib": max_peak_vram if cuda_requested else None,
+        "vram_budget_mib": vram_budget_mib if cuda_requested else None,
     }
 
 
@@ -596,11 +889,20 @@ def _write_plot(path: Path, results: list[dict[str, Any]]) -> bool:
     successful = [row for row in results if row.get("success")]
     figure = make_subplots(
         rows=1,
-        cols=3,
-        subplot_titles=("Wall time", "Peak process RAM", "Training throughput"),
+        cols=4,
+        subplot_titles=(
+            "Wall time",
+            "Peak process RAM",
+            "Training throughput",
+            "Peak tracked VRAM",
+        ),
     )
-    colours = {"primal_svd": "#2563eb", "streamed_dual": "#dc2626"}
-    for solver in ("primal_svd", "streamed_dual"):
+    colours = {
+        "primal_svd": "#2563eb",
+        "streamed_dual": "#dc2626",
+        "torch_cuda_dual": "#16a34a",
+    }
+    for solver in ("primal_svd", "streamed_dual", "torch_cuda_dual"):
         rows = sorted(
             (row for row in successful if row["solver"] == solver),
             key=lambda row: row["feature_count"],
@@ -625,14 +927,32 @@ def _write_plot(path: Path, results: list[dict[str, Any]]) -> bool:
                 row=1,
                 col=column,
             )
-    for column in (1, 2, 3):
+    cuda_rows = sorted(
+        (row for row in successful if row["solver"] == "torch_cuda_dual"),
+        key=lambda row: row["feature_count"],
+    )
+    if cuda_rows:
+        figure.add_trace(
+            go.Scatter(
+                x=[row["feature_count"] for row in cuda_rows],
+                y=[row["peak_vram_mib"] for row in cuda_rows],
+                mode="lines+markers",
+                name="torch_cuda_dual VRAM",
+                legendgroup="torch_cuda_dual",
+                showlegend=False,
+                line={"color": colours["torch_cuda_dual"]},
+            ),
+            row=1,
+            col=4,
+        )
+    for column in (1, 2, 3, 4):
         figure.update_xaxes(type="log", title_text="Random features P", row=1, col=column)
         figure.update_yaxes(type="log", row=1, col=column)
     figure.update_layout(
         title="Phase 2 — RFF computational benchmark",
         template="plotly_white",
         height=500,
-        width=1400,
+        width=1800,
     )
     figure.write_html(path, include_plotlyjs="cdn")
     return True
@@ -641,12 +961,23 @@ def _write_plot(path: Path, results: list[dict[str, Any]]) -> bool:
 def run_phase2(config: Phase2Config, output_directory: Path | None = None) -> dict[str, Any]:
     """Run all benchmark cases in isolated subprocesses and persist the decision artifacts."""
     config.validate()
-    hardware = hardware_inventory()
+    hardware = hardware_inventory(config.cuda_python_executable)
     started_at = time.perf_counter()
     results = [run_isolated_case(case, config) for case in config.cases]
     gate = evaluate_benchmark_gate(results, config, hardware)
     successful = [row for row in results if row.get("success")]
     largest = max(successful, key=lambda row: row["feature_count"]) if successful else None
+    largest_rows = (
+        [row for row in successful if row["feature_count"] == largest["feature_count"]]
+        if largest
+        else []
+    )
+    preferred_solver = (
+        min(largest_rows, key=lambda row: row["total_compute_seconds"])["solver"]
+        if largest_rows
+        else None
+    )
+    cuda_completed = any(row["solver"] == "torch_cuda_dual" for row in successful)
     longest_wall_seconds = max((row["wall_seconds"] for row in successful), default=math.inf)
     if longest_wall_seconds <= 60:
         session_classification = "short"
@@ -668,11 +999,12 @@ def run_phase2(config: Phase2Config, output_directory: Path | None = None) -> di
         "recommendation": {
             "session_classification_at_maximum": session_classification,
             "maximum_tested_features": largest["feature_count"] if largest else 0,
-            "preferred_large_p_solver": "streamed_dual",
-            "gpu_benchmark_required_later": bool(hardware["gpus"]),
+            "preferred_large_p_solver": preferred_solver,
+            "gpu_benchmark_required_later": bool(hardware["gpus"])
+            and not cuda_completed,
             "gpu_blocker": (
                 None
-                if hardware["cuda_python_backend_available"]
+                if cuda_completed or not hardware["gpus"]
                 else "GPU present but no CUDA-enabled Python array backend is installed"
             ),
         },

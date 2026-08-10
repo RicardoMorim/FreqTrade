@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from research.double_descent.benchmark import (
     BenchmarkCase,
     Phase2Config,
     benchmark_case,
+    discover_cuda_python,
     iter_rff_parameter_chunks,
     run_isolated_case,
     run_phase2,
@@ -85,3 +87,36 @@ def test_isolated_benchmark_writes_artifacts(tmp_path: Path) -> None:
     assert summary["gate"]["checks"]["primal_dual_overlap_matches"] is True
     assert (tmp_path / "benchmark.csv").is_file()
     assert (tmp_path / "summary.json").is_file()
+
+
+def test_cuda_streamed_predictions_match_cpu_when_available() -> None:
+    cuda_python = discover_cuda_python()
+    if not cuda_python:
+        pytest.skip("no CUDA-enabled PyTorch interpreter is available")
+    cases = (
+        BenchmarkCase(64, "streamed_dual"),
+        BenchmarkCase(64, "torch_cuda_dual"),
+    )
+    config = Phase2Config(
+        n_train=32,
+        n_inference=48,
+        input_dimension=6,
+        cases=cases,
+        chunk_size=17,
+        base_seed=789,
+        cuda_python_executable=cuda_python,
+    )
+
+    cpu = run_isolated_case(cases[0], config)
+    cuda = run_isolated_case(cases[1], config)
+
+    assert cpu["success"] is True
+    assert cuda["success"] is True, cuda.get("stderr")
+    assert cuda["vram_measured"] is True
+    assert cuda["peak_vram_mib"] > 0
+    np.testing.assert_allclose(
+        cpu["prediction_probe"],
+        cuda["prediction_probe"],
+        rtol=config.overlap_relative_tolerance,
+        atol=config.overlap_relative_tolerance,
+    )

@@ -15,8 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from research.double_descent.benchmark import (  # noqa: E402
     DEFAULT_CASES,
+    DEFAULT_CUDA_CASES,
     BenchmarkCase,
     Phase2Config,
+    discover_cuda_python,
     run_phase2,
 )
 
@@ -24,11 +26,13 @@ from research.double_descent.benchmark import (  # noqa: E402
 def _parse_case(value: str) -> BenchmarkCase:
     try:
         feature_count, solver = value.split(":", 1)
-        if solver not in {"primal_svd", "streamed_dual"}:
+        if solver not in {"primal_svd", "streamed_dual", "torch_cuda_dual"}:
             raise ValueError
         return BenchmarkCase(int(feature_count), solver)
     except (ValueError, TypeError) as exc:
-        raise argparse.ArgumentTypeError("case must use P:primal_svd or P:streamed_dual") from exc
+        raise argparse.ArgumentTypeError(
+            "case must use P:primal_svd, P:streamed_dual, or P:torch_cuda_dual"
+        ) from exc
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -40,6 +44,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=8192)
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--seed", type=int, default=20260810)
+    parser.add_argument(
+        "--cuda-python",
+        type=Path,
+        help="Python interpreter containing a CUDA-enabled PyTorch installation.",
+    )
+    parser.add_argument(
+        "--no-cuda",
+        action="store_true",
+        help="Run only the CPU benchmark even when a CUDA interpreter is discoverable.",
+    )
     parser.add_argument(
         "--case",
         type=_parse_case,
@@ -57,13 +71,26 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     arguments = parse_arguments()
+    cuda_python = None
+    if not arguments.no_cuda:
+        cuda_python = (
+            str(arguments.cuda_python.resolve())
+            if arguments.cuda_python
+            else discover_cuda_python()
+        )
+    if arguments.cases:
+        cases = tuple(arguments.cases)
+    else:
+        cases = DEFAULT_CASES + (DEFAULT_CUDA_CASES if cuda_python else ())
     config = Phase2Config(
         n_train=arguments.n_train,
         n_inference=arguments.n_inference,
-        cases=tuple(arguments.cases) if arguments.cases else DEFAULT_CASES,
+        cases=cases,
         chunk_size=arguments.chunk_size,
         dtype=arguments.dtype,
         base_seed=arguments.seed,
+        overlap_relative_tolerance=1e-4 if arguments.dtype == "float32" else 1e-6,
+        cuda_python_executable=cuda_python,
     )
     summary = run_phase2(config, arguments.output_dir)
     print(json.dumps(summary["gate"], indent=2, sort_keys=True))
