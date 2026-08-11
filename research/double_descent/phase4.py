@@ -28,6 +28,15 @@ from research.double_descent.metrics import prediction_metrics
 from research.double_descent.phase3 import PN_RATIOS, Phase3Config, audit_data_coverage
 
 
+PHASE3_EFFECTIVE_N_BY_TRAIN_PERIOD = {
+    30: 719,
+    60: 1_439,
+    90: 2_159,
+    180: 4_319,
+    365: 8_759,
+}
+
+
 @dataclass(frozen=True)
 class Phase4Config:
     data_directory: Path
@@ -53,6 +62,7 @@ class Phase4Config:
     subprocess_timeout_seconds: int = 1_800
     interpolation_mse_tolerance: float = 1e-16
     resume: bool = True
+    allow_phase3_training_window_variation: bool = False
     strategy_directory: Path = Path("research/double_descent/freqai")
     model_directory: Path = Path("research/double_descent/freqai")
     models_directory: Path = Path("user_data/models")
@@ -70,10 +80,7 @@ class Phase4Config:
             raise FileNotFoundError(f"CUDA Python does not exist: {self.cuda_python_executable}")
 
     def _validate_design(self) -> None:
-        if self.timeframe != "1h" or self.train_period_days != 90:
-            raise ValueError("Phase 4 is frozen to 1h candles and a 90-day training window")
-        if self.effective_n != 2_159:
-            raise ValueError("Phase 4 must use the N=2,159 measured in Phase 3")
+        self._validate_training_window()
         if self.gamma <= 0 or self.ridge < 0 or self.rcond <= 0:
             raise ValueError("gamma/rcond must be positive and ridge must be non-negative")
         if self.dtype not in {"float32", "float64"}:
@@ -90,6 +97,19 @@ class Phase4Config:
         holdout = datetime.strptime(self.holdout_start, "%Y%m%d").replace(tzinfo=UTC)
         if start >= end or end > holdout:
             raise ValueError("development timerange must end no later than the holdout boundary")
+
+    def _validate_training_window(self) -> None:
+        if self.timeframe != "1h":
+            raise ValueError("financial RFF sweeps are frozen to 1h candles")
+        if not self.allow_phase3_training_window_variation:
+            if self.train_period_days != 90 or self.effective_n != 2_159:
+                raise ValueError("Phase 4 is frozen to the Phase 3 90-day N=2,159 design")
+            return
+        expected_n = PHASE3_EFFECTIVE_N_BY_TRAIN_PERIOD.get(self.train_period_days)
+        if expected_n is None:
+            raise ValueError("training window was not measured in Phase 3")
+        if self.effective_n != expected_n:
+            raise ValueError("effective N must exactly match the selected Phase 3 training window")
 
 
 def _parse_timerange(timerange: str) -> tuple[datetime, datetime]:

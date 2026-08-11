@@ -265,3 +265,53 @@ cell nevertheless remained 0.096% worse than the zero-return forecast; the best 
 cell remained 0.082% worse, with zero of three seeds beating zero. Ridge therefore fixes numerical
 variance by shrinking the model toward a nearly constant forecast, but does not reveal predictive
 alpha or economic value. See [PHASE7_RESULTS.md](PHASE7_RESULTS.md).
+
+## Phase 8: training-window sensitivity
+
+Phase 8 changes the rolling training history while keeping the asset, timeframe, chronological OOS
+period, 25 causal inputs, RFF construction, gamma, ridgeless float64 solver, fee, and trading rule
+fixed. It uses the exact effective sample sizes measured by Phase 3:
+
+| Training history | Effective N |
+| ---: | ---: |
+| 30 days | 719 |
+| 60 days | 1,439 |
+| 90 days | 2,159 |
+| 180 days | 4,319 |
+| 365 days | 8,759 |
+
+The reference seed runs the predeclared compact grid `P/N = 0.10, 0.50, 0.90, 0.98, 1.00, 1.02,
+1.10, 2, 5` for every window. The smallest and largest windows additionally repeat the critical
+points `0.10, 1.00, 1.02, 5` across three seeds. `P/N=5` is already materially
+overparameterized while keeping the exact 365-day dual calculation feasible; Phase 6 separately
+established convergence at much larger P and at the exact kernel limit.
+
+The predeclared shape rule requires the global OOS-MSE peak to be near `P/N=1` and at least 50%
+recovery by `P/N=5`. Persistence at 365 days requires the rule in a majority of the three endpoint
+seeds. This is kept separate from useful benign overfitting: the largest model must also beat both
+the zero-return forecast and the best underparameterized model. All comparisons remain development
+only and the 2026 holdout is untouched.
+
+Longer histories alter both N and the mix/recency of market regimes. Phase 8 is therefore a rolling
+window sensitivity test, not a pure causal intervention on sample count. The five-window trend test
+is descriptive and unadjusted for multiple comparisons; it is not used as a discovery claim.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase8.py `
+  --data-dir user_data\data\binance
+```
+
+The 61 cases are checkpointed inside each rolling FreqAI sweep and again after every window/seed
+substudy. Generated artifacts are written to
+`user_data/research_results/double_descent/phase8/`.
+
+The completed run passed all gates. A near-threshold OOS-MSE peak followed by at least 98.51%
+recovery at `P/N=5` appeared in every reference-seed window and in all three endpoint seeds at both
+30 and 365 days. The curve shape therefore did not disappear with more training history. It also
+did not become useful: at `P/N=5`, OOS MSE deteriorated from 12.26 times the zero-return baseline
+at 30 days to 38.00 times at 365 days, and no tested cell beat zero. All 61 costed sign strategies
+had negative return and Sharpe with profit factor below one. Strict all-window interpolation moved
+from `P/N=1` at 30 days to `P/N=1.1` at 365 days, underlining the distinction between nominal P,
+numerical rank, and effective dimension. See [PHASE8_RESULTS.md](PHASE8_RESULTS.md).
