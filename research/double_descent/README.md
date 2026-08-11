@@ -144,3 +144,28 @@ python scripts/run_double_descent_phase3.py `
 Artifacts are written to `user_data/research_results/double_descent/phase3/`. The command exits
 non-zero if data are absent, a Freqtrade subprocess does not produce measurements, or any sample
 integrity gate fails.
+
+## Phase 4: financial P/N sweep
+
+Phase 4 fits deterministic nested RFF models through the real rolling FreqAI path using the
+90-day effective sample size measured in Phase 3 (`N=2,159`). A persistent external CUDA worker
+streams the RFF representation, solves the centered minimum-norm problem in sample space, and
+returns predictions to Freqtrade for chronological OOS evaluation and a costed sign strategy.
+
+The first development sweep uses one frozen seed, gamma `0.2`, ridge `0`, float64, and 19 P/N
+points from 0.10 through 50. The integrity gate passed. MSE peaked at exactly `P/N=1` in all 13
+rolling windows and recovered by 99.94% at the largest model. However, every RFF model had negative
+OOS R2, the largest model was still 14.08 times worse than the zero-return forecast, and every
+costed backtest lost heavily. This is a preliminary double-descent shape, not evidence of useful
+benign overfitting, alpha, or profitability. See [PHASE4_RESULTS.md](PHASE4_RESULTS.md).
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase4.py `
+  --data-dir user_data\data\binance
+```
+
+The runner checkpoints after every ratio and validates complete existing artifacts before
+resuming. Generated results are written to
+`user_data/research_results/double_descent/phase4/`.
