@@ -17,6 +17,13 @@ from numpy.typing import NDArray
 
 
 FloatArray = NDArray[np.float64]
+REPRESENTATIONS = (
+    "market_linear",
+    "market_rff",
+    "pure_noise",
+    "market_plus_noise",
+)
+MAXIMUM_NOISE_CHUNK_SIZE = 1_024
 
 
 def iter_nested_rff_parameters(
@@ -49,15 +56,58 @@ def iter_nested_rff_parameters(
         remaining -= current_size
 
 
+def _splitmix64(values: NDArray[np.uint64]) -> NDArray[np.uint64]:
+    """Vectorized SplitMix64 hash for deterministic counter-based noise."""
+    mixed = values + np.uint64(0x9E3779B97F4A7C15)
+    mixed = (mixed ^ (mixed >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    mixed = (mixed ^ (mixed >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return mixed ^ (mixed >> np.uint64(31))
+
+
+def iter_stateless_noise_features(
+    sample_ids: NDArray[Any],
+    feature_count: int,
+    chunk_size: int,
+    seed: int,
+    dtype: np.dtype[Any],
+    feature_offset: int = 0,
+) -> Iterator[NDArray[Any]]:
+    """Yield nested N(0, 1) predictors keyed only by sample id, feature id, and seed."""
+    if feature_count < 1 or chunk_size < 1 or feature_offset < 0:
+        raise ValueError("noise dimensions must be positive and offset must be non-negative")
+    identifiers = np.asarray(sample_ids)
+    if identifiers.ndim != 1 or identifiers.size < 1:
+        raise ValueError("sample ids must be a non-empty 1D array")
+    identifiers = identifiers.astype(np.int64, copy=False).view(np.uint64).reshape(-1, 1)
+    seed_value = np.uint64(seed)
+    denominator = float(2**53)
+    for start in range(0, feature_count, chunk_size):
+        stop = min(start + chunk_size, feature_count)
+        feature_ids = np.arange(
+            feature_offset + start + 1,
+            feature_offset + stop + 1,
+            dtype=np.uint64,
+        ).reshape(1, -1)
+        counters = identifiers ^ (feature_ids * np.uint64(0xD2B74407B1CE6E93)) ^ seed_value
+        first = _splitmix64(counters)
+        second = _splitmix64(counters ^ np.uint64(0xCA5A826395121157))
+        first_uniform = ((first >> np.uint64(11)).astype(np.float64) + 0.5) / denominator
+        second_uniform = ((second >> np.uint64(11)).astype(np.float64) + 0.5) / denominator
+        normal = np.sqrt(-2.0 * np.log(first_uniform)) * np.cos(2.0 * math.pi * second_uniform)
+        yield normal.astype(dtype, copy=False)
+
+
 @dataclass
 class WorkerState:
     train_inputs: Any
+    train_sample_ids: NDArray[Any] | None
     alpha: Any
     target_mean: Any
     feature_count: int
     chunk_size: int
     gamma: float
     seed: int
+    representation: str
     numpy_dtype: np.dtype[Any]
     torch_dtype: Any
 
@@ -82,12 +132,91 @@ class CudaRFFWorker:
         phase_tensor = torch.as_tensor(phases, dtype=inputs.dtype, device=self.device)
         return math.sqrt(2.0) * torch.cos(inputs @ weight_tensor.T + phase_tensor)
 
+    @staticmethod
+    def _load_sample_ids(request: dict[str, Any], expected_rows: int) -> NDArray[Any] | None:
+        path = request.get("sample_ids_path")
+        if path is None:
+            return None
+        sample_ids = np.load(path, allow_pickle=False)
+        if sample_ids.ndim != 1 or sample_ids.shape[0] != expected_rows:
+            raise ValueError("sample ids must be 1D and match the input rows")
+        if not np.issubdtype(sample_ids.dtype, np.integer):
+            raise ValueError("sample ids must be integers")
+        sample_ids = sample_ids.astype(np.int64, copy=False)
+        if np.unique(sample_ids).size != sample_ids.size:
+            raise ValueError("sample ids must be unique")
+        return sample_ids
+
+    @staticmethod
+    def _validate_representation(
+        representation: str,
+        feature_count: int,
+        input_dimension: int,
+        sample_ids: NDArray[Any] | None,
+    ) -> None:
+        if representation not in REPRESENTATIONS:
+            raise ValueError(f"unknown representation: {representation}")
+        if representation == "market_linear" and feature_count != input_dimension:
+            raise ValueError("market_linear requires one predictor per market input")
+        if representation == "market_plus_noise" and feature_count < input_dimension:
+            raise ValueError("market_plus_noise cannot use fewer predictors than market inputs")
+        if representation in {"pure_noise", "market_plus_noise"} and sample_ids is None:
+            raise ValueError(f"{representation} requires deterministic sample ids")
+
+    def _feature_chunks(
+        self,
+        inputs: Any,
+        sample_ids: NDArray[Any] | None,
+        representation: str,
+        feature_count: int,
+        chunk_size: int,
+        gamma: float,
+        seed: int,
+        numpy_dtype: np.dtype[Any],
+    ) -> Iterator[Any]:
+        torch = self.torch
+        if representation == "market_rff":
+            for weights, phases in iter_nested_rff_parameters(
+                inputs.shape[1],
+                feature_count,
+                chunk_size,
+                gamma,
+                seed,
+                numpy_dtype,
+            ):
+                yield self._rff_chunk(inputs, weights, phases)
+            return
+        if representation in {"market_linear", "market_plus_noise"}:
+            yield inputs
+        if representation in {"pure_noise", "market_plus_noise"}:
+            if sample_ids is None:
+                raise RuntimeError("noise representation is missing sample ids")
+            noise_count = (
+                feature_count
+                if representation == "pure_noise"
+                else feature_count - int(inputs.shape[1])
+            )
+            if noise_count:
+                effective_chunk_size = min(chunk_size, MAXIMUM_NOISE_CHUNK_SIZE)
+                for noise in iter_stateless_noise_features(
+                    sample_ids,
+                    noise_count,
+                    effective_chunk_size,
+                    seed,
+                    numpy_dtype,
+                    feature_offset=(
+                        int(inputs.shape[1]) if representation == "market_plus_noise" else 0
+                    ),
+                ):
+                    yield torch.as_tensor(noise, dtype=inputs.dtype, device=self.device)
+
     def fit(self, request: dict[str, Any]) -> dict[str, Any]:
         torch = self.torch
         feature_count = int(request["feature_count"])
         chunk_size = min(int(request["chunk_size"]), feature_count)
         gamma = float(request["gamma"])
         seed = int(request["seed"])
+        representation = str(request.get("representation", "market_rff"))
         ridge = float(request["ridge"])
         rcond = float(request["rcond"])
         dtype_name = str(request["dtype"])
@@ -109,6 +238,13 @@ class CudaRFFWorker:
             raise ValueError("training inputs and target lengths differ")
         if not np.isfinite(inputs_numpy).all() or not np.isfinite(target_numpy).all():
             raise ValueError("training arrays contain non-finite values")
+        sample_ids = self._load_sample_ids(request, inputs_numpy.shape[0])
+        self._validate_representation(
+            representation,
+            feature_count,
+            inputs_numpy.shape[1],
+            sample_ids,
+        )
 
         self.state = None
         torch.cuda.empty_cache()
@@ -122,16 +258,22 @@ class CudaRFFWorker:
         gram = torch.zeros((sample_count, sample_count), dtype=torch_dtype, device=self.device)
         feature_generation_seconds = 0.0
         gram_seconds = 0.0
-        for weights, phases in iter_nested_rff_parameters(
-            inputs_numpy.shape[1],
+        chunks = self._feature_chunks(
+            train_inputs,
+            sample_ids,
+            representation,
             feature_count,
             chunk_size,
             gamma,
             seed,
             numpy_dtype,
-        ):
+        )
+        while True:
             generation_started = time.perf_counter()
-            chunk = self._rff_chunk(train_inputs, weights, phases)
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
             torch.cuda.synchronize(self.device)
             feature_generation_seconds += time.perf_counter() - generation_started
             gram_started = time.perf_counter()
@@ -171,20 +313,39 @@ class CudaRFFWorker:
         )
         self.state = WorkerState(
             train_inputs=train_inputs,
+            train_sample_ids=sample_ids,
             alpha=alpha,
             target_mean=target_mean,
             feature_count=feature_count,
             chunk_size=chunk_size,
             gamma=gamma,
             seed=seed,
+            representation=representation,
             numpy_dtype=numpy_dtype,
             torch_dtype=torch_dtype,
         )
         device = torch.cuda.get_device_properties(0)
+        market_feature_count = (
+            int(inputs_numpy.shape[1])
+            if representation in {"market_linear", "market_plus_noise"}
+            else 0
+        )
+        noise_feature_count = (
+            feature_count
+            if representation == "pure_noise"
+            else (
+                feature_count - int(inputs_numpy.shape[1])
+                if representation == "market_plus_noise"
+                else 0
+            )
+        )
         return {
             "n_train": int(sample_count),
             "input_dimension": int(inputs_numpy.shape[1]),
             "feature_count": feature_count,
+            "representation": representation,
+            "market_feature_count": market_feature_count,
+            "noise_feature_count": noise_feature_count,
             "rank": int(retained_eigenvalues.numel()),
             "effective_rank": float(effective_rank.item()),
             "condition_number": float(condition_number.item()),
@@ -225,6 +386,13 @@ class CudaRFFWorker:
             raise ValueError("prediction input dimensions do not match training")
         if not np.isfinite(inputs_numpy).all():
             raise ValueError("prediction inputs contain non-finite values")
+        sample_ids = self._load_sample_ids(request, inputs_numpy.shape[0])
+        self._validate_representation(
+            state.representation,
+            state.feature_count,
+            int(inputs_numpy.shape[1]),
+            sample_ids,
+        )
         started = time.perf_counter()
         inputs = torch.as_tensor(inputs_numpy, dtype=state.torch_dtype, device=self.device)
         prediction = torch.full(
@@ -233,16 +401,27 @@ class CudaRFFWorker:
             dtype=state.torch_dtype,
             device=self.device,
         )
-        for weights, phases in iter_nested_rff_parameters(
-            state.train_inputs.shape[1],
+        train_chunks = self._feature_chunks(
+            state.train_inputs,
+            state.train_sample_ids,
+            state.representation,
             state.feature_count,
             state.chunk_size,
             state.gamma,
             state.seed,
             state.numpy_dtype,
-        ):
-            train_chunk = self._rff_chunk(state.train_inputs, weights, phases)
-            inference_chunk = self._rff_chunk(inputs, weights, phases)
+        )
+        inference_chunks = self._feature_chunks(
+            inputs,
+            sample_ids,
+            state.representation,
+            state.feature_count,
+            state.chunk_size,
+            state.gamma,
+            state.seed,
+            state.numpy_dtype,
+        )
+        for train_chunk, inference_chunk in zip(train_chunks, inference_chunks, strict=True):
             feature_mean = torch.mean(train_chunk, dim=0)
             coefficient_chunk = (train_chunk - feature_mean).T @ state.alpha
             coefficient_chunk /= state.feature_count

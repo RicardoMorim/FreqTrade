@@ -357,3 +357,58 @@ it is now frozen for subsequent development phases. This is only a relative cali
 0/84 models beat zero-return MSE, 0/84 produced positive OOS R2, and every costed sign strategy lost
 money. All gamma values retained a robust interpolation peak and second descent across three seeds,
 but none showed useful benign overfitting. See [PHASE9_RESULTS.md](PHASE9_RESULTS.md).
+
+## Phase 10: market information versus noise features
+
+Phase 10 tests whether the observed high-dimensional recovery requires market information or is a
+generic property of fitting random designs. The experiment compares four frozen representations:
+
+1. `market_linear`: the 25 standardized causal market inputs, used once as a low-dimensional
+   anchor;
+2. `market_rff`: P nested RFF of those market inputs using the Phase 9-frozen `gamma=0.5`;
+3. `pure_noise`: P deterministic iid-N(0,1) predictors keyed only by timestamp, feature id, and
+   seed;
+4. `market_plus_noise`: the first 25 pure-noise columns are replaced by the 25 market inputs while
+   columns 26 through P remain identical, keeping total predictor count P exactly matched.
+
+Timestamp-keyed counter-based noise makes every row reproducible without using market values or
+targets. Its prefixes are nested across P and independent of chunk size, so increasing complexity
+adds predictors to the same random space. The noise is generated inside the streamed CUDA solver
+rather than materializing hundreds of thousands of DataFrame columns.
+
+The reference seed maps `P/N = 0.10, 0.50, 0.90, 0.98, 1.00, 1.02, 1.10, 2, 5, 10, 50` for the
+three high-dimensional representations. Two further seeds repeat `0.10, 1.00, 1.02, 5, 50`.
+Together with the single 25-feature market anchor, this produces 64 cases. All cases use the same
+2025 rolling OOS period, 90-day training window, measured `N=2,159`, ridgeless float64 solver,
+0.1% fee per side, and sign strategy. The 2026 holdout remains sealed.
+
+The primary evidence is chronological OOS prediction error, not trading. Matched comparisons ask:
+
+- whether market RFF beats pure noise at the same P and seed;
+- whether adding 25 market inputs improves on pure noise;
+- whether pure noise itself produces an interpolation peak and second descent without predictive
+  alpha.
+
+A double-descent curve in pure noise would show that curve shape alone is not evidence of market
+information. Conversely, systematic pure-noise performance better than the zero-return forecast
+would trigger a leakage/reproducibility investigation rather than an alpha claim. Pairwise win
+counts and effect ratios are descriptive; three seeds are insufficient for a strong significance
+claim, and no parameters are selected in this phase.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase10.py `
+  --data-dir user_data\data\binance
+```
+
+The run checkpoints every case and substudy under
+`user_data/research_results/double_descent/phase10/`.
+
+The completed run passed every integrity gate: 64/64 cases and 832/832 rolling fits succeeded while
+the 2026 holdout remained sealed. All three high-dimensional representations showed an
+interpolation peak and second descent in every seed, but pure noise reproduced the same shape and
+never beat the zero-return forecast. Market RFF beat matched pure noise in only 1/15 robust cells,
+and no model among all 64 cases achieved positive OOS R2, positive net return, positive Sharpe, or
+profit factor above one. Phase 10 therefore supports double-descent geometry, not useful benign
+overfitting or financial alpha. See [PHASE10_RESULTS.md](PHASE10_RESULTS.md).

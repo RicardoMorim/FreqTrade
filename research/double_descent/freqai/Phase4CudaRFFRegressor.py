@@ -88,6 +88,7 @@ class _CudaWorkerClient:
         inputs: np.ndarray,
         target: np.ndarray,
         parameters: dict[str, Any],
+        sample_ids: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         self._request_index += 1
         prefix = self._path / f"fit_{self._request_index}"
@@ -96,23 +97,41 @@ class _CudaWorkerClient:
         prediction_path = prefix.with_name(prefix.name + "_prediction.npy")
         np.save(inputs_path, inputs, allow_pickle=False)
         np.save(target_path, target, allow_pickle=False)
+        sample_ids_payload = {}
+        if sample_ids is not None:
+            sample_ids_path = prefix.with_name(prefix.name + "_sample_ids.npy")
+            np.save(sample_ids_path, sample_ids, allow_pickle=False)
+            sample_ids_payload["sample_ids_path"] = str(sample_ids_path)
         diagnostics = self._request(
             "fit",
             inputs_path=str(inputs_path),
             target_path=str(target_path),
             train_prediction_path=str(prediction_path),
+            **sample_ids_payload,
             **parameters,
         )
         return np.load(prediction_path, allow_pickle=False), diagnostics
 
-    def predict(self, inputs: np.ndarray) -> np.ndarray:
+    def predict(
+        self,
+        inputs: np.ndarray,
+        sample_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
         self._request_index += 1
         prefix = self._path / f"predict_{self._request_index}"
         inputs_path = prefix.with_name(prefix.name + "_inputs.npy")
         output_path = prefix.with_name(prefix.name + "_output.npy")
         np.save(inputs_path, inputs, allow_pickle=False)
+        sample_ids_payload = {}
+        if sample_ids is not None:
+            sample_ids_path = prefix.with_name(prefix.name + "_sample_ids.npy")
+            np.save(sample_ids_path, sample_ids, allow_pickle=False)
+            sample_ids_payload["sample_ids_path"] = str(sample_ids_path)
         diagnostics = self._request(
-            "predict", inputs_path=str(inputs_path), output_path=str(output_path)
+            "predict",
+            inputs_path=str(inputs_path),
+            output_path=str(output_path),
+            **sample_ids_payload,
         )
         prediction = np.load(output_path, allow_pickle=False)
         if not diagnostics["prediction_finite"]:
