@@ -315,3 +315,45 @@ at 30 days to 38.00 times at 365 days, and no tested cell beat zero. All 61 cost
 had negative return and Sharpe with profit factor below one. Strict all-window interpolation moved
 from `P/N=1` at 30 days to `P/N=1.1` at 365 days, underlining the distinction between nominal P,
 numerical rank, and effective dimension. See [PHASE8_RESULTS.md](PHASE8_RESULTS.md).
+
+## Phase 9: pre-holdout gamma calibration
+
+Phase 9 selects a reasonable RFF/RBF kernel scale without reusing the already inspected 2025
+experiment or touching the sealed 2026 holdout. The calibration interval is frozen at
+`2024-07-01` through `2025-01-01`; every rolling model uses the same 90-day history, 30-day
+evaluation step, 25 causal inputs, ridgeless float64 CUDA solver, fee, and sign strategy as the
+earlier financial phases.
+
+The frozen candidate grid is `gamma = 0.05, 0.1, 0.2, 0.5`. Seed `20260810` maps
+`P/N = 0.10, 0.50, 0.90, 0.98, 1.00, 1.02, 1.10, 2, 5, 10, 50`; seeds `1898170439` and
+`3432960257` repeat `0.10, 1.00, 1.02, 5, 50`. Because each gamma rescales the same seeded
+Gaussian projection draws, the comparisons remain paired rather than introducing unrelated random
+feature spaces. The design contains 84 cases and at least six rolling training windows per case.
+
+Selection is prediction-only. For each gamma, the score is the geometric mean of OOS MSE divided
+by the zero-return MSE at `P/N = 0.10, 5, 50` across all three seeds. A candidate is eligible only
+if the double-descent shape rule passes in at least two seeds. A challenger replaces the existing
+`gamma=0.2` baseline only if it lowers the score by at least 5% and wins at least six of the nine
+matched seed/ratio comparisons. Trading results are recorded as downstream diagnostics but cannot
+influence gamma selection. If no challenger clears both hurdles, `gamma=0.2` remains frozen.
+
+This is a development calibration with four candidate scales and is not confirmatory evidence of
+alpha. The selected gamma is frozen for subsequent development phases; neither the 2025 main
+experiment nor the final 2026 holdout is part of the selection.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase9.py `
+  --data-dir user_data\data\binance
+```
+
+The run checkpoints after each gamma/seed substudy and writes its generated evidence under
+`user_data/research_results/double_descent/phase9/`.
+
+The completed 84-case run passed every gate and selected `gamma=0.5`. It reduced the predeclared
+prediction-error score by 48.04% relative to `gamma=0.2` and won all nine matched comparisons, so
+it is now frozen for subsequent development phases. This is only a relative calibration success:
+0/84 models beat zero-return MSE, 0/84 produced positive OOS R2, and every costed sign strategy lost
+money. All gamma values retained a robust interpolation peak and second descent across three seeds,
+but none showed useful benign overfitting. See [PHASE9_RESULTS.md](PHASE9_RESULTS.md).
