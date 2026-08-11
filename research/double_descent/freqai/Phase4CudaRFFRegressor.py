@@ -145,7 +145,7 @@ class _CudaRFFPredictor:
 
 
 class Phase4CudaRFFRegressor(BaseRegressionModel):
-    """Fit one deterministic ridgeless RFF model in each genuine FreqAI window."""
+    """Fit one deterministic RFF ridge model in each genuine FreqAI window."""
 
     def train(
         self,

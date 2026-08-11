@@ -227,3 +227,41 @@ an estimated `P^-0.509` rate. One million features passed the practical converge
 12.99 times worse than the zero-return forecast and lost 93.44% in the costed sign strategy. The
 finite RFF results therefore converge correctly toward a bad predictive limit. See
 [PHASE6_RESULTS.md](PHASE6_RESULTS.md).
+
+## Phase 7: explicit Ridge regularization map
+
+Phase 7 tests whether explicit L2 regularization suppresses the interpolation catastrophe and
+whether any apparent improvement represents genuine predictive information or merely shrinkage
+toward the zero-return forecast. Ridge is applied to the centered RFF coefficients while leaving
+the rolling-window intercept unregularized:
+
+```text
+(K + lambda I) alpha = y
+```
+
+The grid is frozen before execution at `lambda = 0, 1e-8, 1e-6, 1e-4, 1e-2, 1, 100`. The audited
+reference seed runs the complete 19-point P/N grid. Two additional predeclared seeds repeat the
+critical ratios `0.10`, `1.00`, `1.02`, and `50`, producing an initial three-seed robustness check.
+The `lambda=0` cases are rerun and must reproduce Phase 5 within numerical tolerance.
+
+Implementation gates additionally require training MSE to be non-decreasing and effective degrees
+of freedom, normalized coefficient norm, and regularized system condition number to be
+non-increasing as lambda grows for every matched seed/P/N cell. These are solver-integrity checks,
+not desired financial outcomes. The 2026 holdout remains untouched.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase7.py `
+  --data-dir user_data\data\binance
+```
+
+The map is checkpointed after every seed/lambda substudy under
+`user_data/research_results/double_descent/phase7/`.
+
+The completed 189-case run passed every gate. `lambda=1` removed 99.995% of the interpolation-peak
+MSE in all three tested seeds, and strong Ridge flattened the P/N curve. The best reference-map
+cell nevertheless remained 0.096% worse than the zero-return forecast; the best three-seed critical
+cell remained 0.082% worse, with zero of three seeds beating zero. Ridge therefore fixes numerical
+variance by shrinking the model toward a nearly constant forecast, but does not reveal predictive
+alpha or economic value. See [PHASE7_RESULTS.md](PHASE7_RESULTS.md).

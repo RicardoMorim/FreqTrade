@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from freqtrade.configuration import TimeRange
 from freqtrade.data.btanalysis import load_backtest_stats
 from freqtrade.data.history import load_pair_history
 from freqtrade.enums import CandleType
+from freqtrade.exceptions import OperationalException
 from research.double_descent.metrics import prediction_metrics
 from research.double_descent.phase3 import PN_RATIOS, Phase3Config, audit_data_coverage
 
@@ -124,7 +126,7 @@ def build_freqtrade_config(
     metrics_path: Path,
     run_id: str,
 ) -> dict[str, Any]:
-    """Build a frozen development-only ridgeless RFF configuration."""
+    """Build a frozen development-only RFF configuration."""
     return {
         "$schema": "https://schema.freqtrade.io/schema.json",
         "trading_mode": "futures",
@@ -349,7 +351,7 @@ def _aggregate_training_diagnostics(
 ) -> dict[str, Any]:
     if not records:
         return {}
-    return {
+    aggregated = {
         "training_window_count": len(records),
         "effective_n_values": sorted({int(row["effective_n"]) for row in records}),
         "input_feature_counts": sorted({int(row["input_feature_count"]) for row in records}),
@@ -370,6 +372,16 @@ def _aggregate_training_diagnostics(
         "peak_vram_mib": max(float(row["peak_vram_mib"]) for row in records),
         "cuda_devices": sorted({row["cuda_device"] for row in records}),
     }
+    optional_mean_metrics = (
+        "normalized_feature_coefficient_norm",
+        "ridge_effective_degrees_of_freedom",
+        "ridge_system_condition_number",
+    )
+    for key in optional_mean_metrics:
+        if all(key in row for row in records):
+            aggregated[f"{key}_mean"] = statistics.fmean(float(row[key]) for row in records)
+            aggregated[f"{key}_maximum"] = max(float(row[key]) for row in records)
+    return aggregated
 
 
 def _finalize_case(
@@ -399,7 +411,7 @@ def _finalize_case(
     backtest_files = sorted(backtest_directory.glob("*.zip"))
     try:
         trading = _extract_trading_metrics(backtest_files[-1]) if backtest_files else {}
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OperationalException) as exc:
         trading = {"error": str(exc)}
     start, end = _parse_timerange(config.timerange)
     expected_predictions = int((end - start).total_seconds() / 3600) - 1
@@ -507,6 +519,8 @@ def _run_case(
     config_directory = config.output_directory / "configs"
     log_directory = config.output_directory / "logs"
     backtest_directory = config.output_directory / "backtests" / slug
+    if backtest_directory.exists():
+        shutil.rmtree(backtest_directory)
     for directory in (config_directory, log_directory, backtest_directory):
         directory.mkdir(parents=True, exist_ok=True)
     metrics_path = config.output_directory / "training_diagnostics" / f"{slug}.jsonl"

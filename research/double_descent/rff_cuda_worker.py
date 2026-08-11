@@ -63,7 +63,7 @@ class WorkerState:
 
 
 class CudaRFFWorker:
-    """Fit ridgeless RFF models in sample space and retain one model for inference."""
+    """Fit RFF ridge models in sample space and retain one model for inference."""
 
     def __init__(self) -> None:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -148,19 +148,22 @@ class CudaRFFWorker:
         retained = eigenvalues > largest_eigenvalue * relative_eigenvalue_threshold
         retained_eigenvalues = eigenvalues[retained]
         retained_eigenvectors = eigenvectors[:, retained]
-        if ridge == 0:
-            denominators = retained_eigenvalues
-        else:
-            denominators = retained_eigenvalues + ridge
-        alpha = retained_eigenvectors @ ((retained_eigenvectors.T @ centered_target) / denominators)
+        denominators = retained_eigenvalues if ridge == 0 else retained_eigenvalues + ridge
+        projected_target = retained_eigenvectors.T @ centered_target
+        spectral_coefficients = projected_target / denominators
+        alpha = retained_eigenvectors @ spectral_coefficients
         train_prediction = target_mean + gram @ alpha
         torch.cuda.synchronize(self.device)
         solver_seconds = time.perf_counter() - solver_started
         train_residual = train_prediction - train_target
-        coefficient_squared_norm = (alpha @ gram @ alpha) / feature_count
+        normalized_coefficient_squared_norm = alpha @ gram @ alpha
+        raw_coefficient_squared_norm = normalized_coefficient_squared_norm / feature_count
         positive_eigenvalues = retained_eigenvalues.to(torch.float64)
         condition_number = torch.sqrt(positive_eigenvalues[-1] / positive_eigenvalues[0])
         effective_rank = positive_eigenvalues.sum() ** 2 / (positive_eigenvalues.square().sum())
+        ridge_denominators = positive_eigenvalues + ridge
+        ridge_effective_degrees_of_freedom = torch.sum(positive_eigenvalues / ridge_denominators)
+        ridge_system_condition_number = ridge_denominators[-1] / ridge_denominators[0]
         np.save(
             request["train_prediction_path"],
             train_prediction.detach().cpu().numpy(),
@@ -185,7 +188,12 @@ class CudaRFFWorker:
             "rank": int(retained_eigenvalues.numel()),
             "effective_rank": float(effective_rank.item()),
             "condition_number": float(condition_number.item()),
-            "coefficient_norm": math.sqrt(max(float(coefficient_squared_norm.item()), 0.0)),
+            "coefficient_norm": math.sqrt(max(float(raw_coefficient_squared_norm.item()), 0.0)),
+            "normalized_feature_coefficient_norm": math.sqrt(
+                max(float(normalized_coefficient_squared_norm.item()), 0.0)
+            ),
+            "ridge_effective_degrees_of_freedom": float(ridge_effective_degrees_of_freedom.item()),
+            "ridge_system_condition_number": float(ridge_system_condition_number.item()),
             "scaled_train_mse": float(torch.mean(train_residual.square()).item()),
             "scaled_train_max_abs_error": float(torch.max(torch.abs(train_residual)).item()),
             "relative_eigenvalue_threshold": relative_eigenvalue_threshold,

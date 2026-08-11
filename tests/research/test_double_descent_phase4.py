@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from research.double_descent.freqai.Phase4CudaRFFRegressor import _CudaWorkerCli
 from research.double_descent.metrics import prediction_metrics
 from research.double_descent.phase4 import (
     Phase4Config,
+    _run_case,
     assess_curve,
     build_freqtrade_config,
     evaluate_oos_predictions,
@@ -173,3 +175,36 @@ def test_external_cuda_worker_interpolates_small_problem(tmp_path: Path) -> None
     coefficients = np.linalg.lstsq(train_rff - feature_mean, target - target_mean, rcond=1e-12)[0]
     cpu_prediction = target_mean + (inference_rff - feature_mean) @ coefficients
     np.testing.assert_allclose(prediction, cpu_prediction, rtol=1e-7, atol=1e-7)
+
+
+def test_phase4_rerun_discards_stale_partial_backtest(tmp_path: Path, monkeypatch) -> None:
+    ratio = 1.0
+    seed = 42
+    config = Phase4Config(
+        data_directory=tmp_path,
+        output_directory=tmp_path / "output",
+        python_executable=str(tmp_path / "python.exe"),
+        cuda_python_executable=str(tmp_path / "cuda.exe"),
+        ratios=(ratio,),
+        seed=seed,
+    )
+    slug = "pn-1.00-p-2159-seed-42"
+    backtest_directory = config.output_directory / "backtests" / slug
+    backtest_directory.mkdir(parents=True)
+    stale_metadata = backtest_directory / "partial.meta.json"
+    stale_metadata.write_bytes(b"\x00" * 32)
+
+    monkeypatch.setattr(
+        "research.double_descent.phase4.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    def finalize(*args, **kwargs):
+        assert not stale_metadata.exists()
+        return {"success": True}
+
+    monkeypatch.setattr("research.double_descent.phase4._finalize_case", finalize)
+
+    result = _run_case(config, ratio, "resume-test", pd.DataFrame())
+
+    assert result["success"] is True
