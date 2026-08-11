@@ -26,7 +26,13 @@ def _timestamp(value: Any) -> str | None:
 
 
 class _CudaWorkerClient:
-    def __init__(self, python_executable: str, stderr_path: Path) -> None:
+    def __init__(
+        self,
+        python_executable: str,
+        stderr_path: Path,
+        worker_module: str = "research.double_descent.rff_cuda_worker",
+        temporary_prefix: str = "phase4-rff-",
+    ) -> None:
         executable = Path(python_executable)
         if not executable.is_file():
             raise FileNotFoundError(f"CUDA Python executable does not exist: {executable}")
@@ -40,7 +46,7 @@ class _CudaWorkerClient:
                 str(executable),
                 "-u",
                 "-m",
-                "research.double_descent.rff_cuda_worker",
+                worker_module,
                 "--serve",
             ],
             cwd=Path.cwd(),
@@ -52,7 +58,7 @@ class _CudaWorkerClient:
             encoding="utf-8",
             errors="replace",
         )
-        self._temporary_directory = tempfile.TemporaryDirectory(prefix="phase4-rff-")
+        self._temporary_directory = tempfile.TemporaryDirectory(prefix=temporary_prefix)
         self._path = Path(self._temporary_directory.name)
         self._request_index = 0
         self._closed = False

@@ -198,3 +198,32 @@ The completed initial run passed all gates. The interpolation peak occurred at `
 seeds and mean recovery by `P/N=50` was 99.929%. This robust shape is not useful benign overfitting:
 the extreme model remained 13.80 times worse than the zero-return forecast, no RFF model beat zero
 in any seed, and all costed strategies failed. See [PHASE5_RESULTS.md](PHASE5_RESULTS.md).
+
+## Phase 6: exact RBF-kernel limit
+
+Phase 6 computes the exact centered RBF kernel corresponding to the frozen RFF representation and
+runs it through the same rolling FreqAI path. It compares the exact `P=infinity` prediction vector
+with all five RFF seeds at approximately 10K, 54K, 108K, 250K, 500K, and one million features.
+
+Convergence is evaluated directly from matched OOS predictions rather than inferred from similar
+headline MSE values. The predeclared practical criterion requires both mean relative prediction
+error and relative OOS-MSE distance to the exact kernel to be at most 10% at one million features.
+Passing that numerical criterion is kept separate from beating simple predictive and economic
+baselines.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase6.py `
+  --data-dir user_data\data\binance
+```
+
+The large finite-RFF cases are streamed on CUDA and checkpointed after every feature count and seed.
+Generated artifacts are written to `user_data/research_results/double_descent/phase6/`.
+
+The completed run passed every gate. Prediction distance to the exact kernel fell monotonically at
+an estimated `P^-0.509` rate. One million features passed the practical convergence criterion with
+7.33% relative prediction error and an OOS-MSE gap of 0.84%. The exact kernel nevertheless remained
+12.99 times worse than the zero-return forecast and lost 93.44% in the costed sign strategy. The
+finite RFF results therefore converge correctly toward a bad predictive limit. See
+[PHASE6_RESULTS.md](PHASE6_RESULTS.md).
