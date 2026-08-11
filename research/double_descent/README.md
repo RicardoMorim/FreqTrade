@@ -169,3 +169,32 @@ python scripts/run_double_descent_phase4.py `
 The runner checkpoints after every ratio and validates complete existing artifacts before
 resuming. Generated results are written to
 `user_data/research_results/double_descent/phase4/`.
+
+## Phase 5: multiple random seeds
+
+Phase 5 repeats the frozen Phase 4 experiment across five predeclared RFF projections. The Phase 4
+seed is reused only after its complete summary and configuration pass a compatibility audit. Four
+additional independent seeds are derived deterministically from `numpy.random.SeedSequence(20260810)`;
+no result is inspected when choosing them.
+
+For every P/N point, Phase 5 reports the mean, median, sample standard deviation, range, and a 95%
+Student-t interval across seeds. It separately evaluates whether the interpolation spike and second
+descent are reproducible, whether extreme models beat the zero-return and underparameterized
+baselines, and whether prediction or trading evidence is present. A repeatable curve shape alone is
+not labelled benign overfitting.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase5.py `
+  --data-dir user_data\data\binance
+```
+
+The default run performs 76 new rolling FreqAI backtests and audits the 19 Phase 4 reference cases.
+It checkpoints at seed and P/N level. Generated artifacts are written to
+`user_data/research_results/double_descent/phase5/`.
+
+The completed initial run passed all gates. The interpolation peak occurred at `P/N=1` in all five
+seeds and mean recovery by `P/N=50` was 99.929%. This robust shape is not useful benign overfitting:
+the extreme model remained 13.80 times worse than the zero-return forecast, no RFF model beat zero
+in any seed, and all costed strategies failed. See [PHASE5_RESULTS.md](PHASE5_RESULTS.md).
