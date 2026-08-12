@@ -453,3 +453,31 @@ or profit-factor-above-one strategy. The interpolation peak and second descent s
 all three seeds, while shuffled MSE was 2.37 times unshuffled MSE by median across matched robust
 cells. This negative control finds no manufactured alpha and further demonstrates that curve shape
 alone does not identify financial signal. See [PHASE11_RESULTS.md](PHASE11_RESULTS.md).
+
+## Phase 12: frozen simple baselines
+
+Phase 12 asks whether the RFF complexity is justified against deliberately simple references. The
+predeclared prediction set is: zero return, rolling historical mean, OLS on the 25 raw market
+features, Ridge with frozen `alpha=1`, one-hour momentum, hourly-scaled 24-hour momentum, and
+training-scaled volatility-adjusted 24-hour momentum. Buy-and-hold is included only as an economic
+reference.
+
+Every baseline runs through the same genuine rolling FreqAI path used by the RFF experiments:
+BTC perpetual futures at 1h, 90-day training, 30-day evaluation, measured `N=2,159`, the full 2025
+development interval, 1x exposure, and 0.1% fee per side. No baseline parameter is selected using
+PnL or Sharpe, trading is excluded from prediction inference, and the 2026 holdout remains sealed.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase12.py `
+  --data-dir user_data\data\binance
+```
+
+The completed run passed all gates: 8/8 cases and 104/104 rolling fits succeeded. Zero return had
+the lowest OOS MSE; 0/6 alternative prediction baselines beat it. The best learnable baseline was
+Ridge, still 1.27% worse than zero. The best Phase 10 market RFF was 20.33% worse than zero, while
+the best market RFF at `P/N >= 5` was 4.52 times worse. Every active strategy, including buy-and-hold, lost
+money after fees. The independent CPU OLS also reproduced the Phase 10 CUDA raw-linear anchor to
+numerical tolerance. Complexity is therefore not justified by prediction or trading evidence in
+the development sample. See [PHASE12_RESULTS.md](PHASE12_RESULTS.md).
