@@ -412,3 +412,44 @@ never beat the zero-return forecast. Market RFF beat matched pure noise in only 
 and no model among all 64 cases achieved positive OOS R2, positive net return, positive Sharpe, or
 profit factor above one. Phase 10 therefore supports double-descent geometry, not useful benign
 overfitting or financial alpha. See [PHASE10_RESULTS.md](PHASE10_RESULTS.md).
+
+## Phase 11: shuffled-label negative control
+
+Phase 11 destroys the relationship between predictors and training targets while preserving the
+market features, their dates, the OOS targets, and every frozen model parameter. Labels are
+permuted only within each rolling training window using a deterministic timestamp-keyed
+derangement. The target multiset is therefore unchanged, no observation retains its own label, and
+the exact same permutation is reused across P for a matched feature/permutation seed pair.
+
+The Phase 10 market-RFF design is repeated with `gamma=0.5`, ridge zero, float64 CUDA, measured
+`N=2,159`, and the same 2025 rolling OOS period. The reference seed maps all 11 P/N points through
+`P/N=50` (`P=107,950`); two additional paired feature/permutation seeds repeat the five robustness
+points. This produces 21 cases and 273 expected rolling fits. Every shuffled case is compared with
+its exact unshuffled Phase 10 feature-seed/P/N counterpart.
+
+The negative control fails scientifically if shuffled labels produce systematic MSE below the
+zero-return forecast, positive OOS R2, or economically consistent performance across seeds. Any
+such result triggers a leakage/reproducibility investigation rather than an alpha claim. Training
+permutation quality is gated separately: label multisets must be exactly preserved, permutation
+fingerprints must match across P, and the absolute in-window original-versus-shuffled label
+correlation must remain below 0.10. Trading remains excluded from inference and the 2026 holdout
+remains sealed.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase11.py `
+  --data-dir user_data\data\binance
+```
+
+The runner checkpoints every case and paired-seed substudy under
+`user_data/research_results/double_descent/phase11/`.
+
+The completed control passed every integrity gate: 21/21 cases and 273/273 rolling fits succeeded,
+all target multisets and timestamp-keyed derangements were verified, and the Phase 10 OOS coverage,
+target moments, and zero baseline reproduced within numerical tolerance. Shuffled labels beat zero
+in 0/21 cases, produced positive OOS R2 in 0/21, and generated no positive-return, positive-Sharpe,
+or profit-factor-above-one strategy. The interpolation peak and second descent still appeared in
+all three seeds, while shuffled MSE was 2.37 times unshuffled MSE by median across matched robust
+cells. This negative control finds no manufactured alpha and further demonstrates that curve shape
+alone does not identify financial signal. See [PHASE11_RESULTS.md](PHASE11_RESULTS.md).
