@@ -515,3 +515,29 @@ the frozen 250 minimum. Its apparently favorable OLS result is quarantined as in
 than changing thresholds after seeing the data. The robust curve shape is therefore not
 regime-concentrated, while useful benign overfitting remains unsupported. See
 [PHASE13_RESULTS.md](PHASE13_RESULTS.md).
+
+## Phase 14: frozen cross-asset replication on ETH
+
+Phase 14 transfers the complete 2025 BTC design to `ETH/USDT:USDT` without selecting any parameter
+on ETH. It repeats 21 RFF cases and all eight simple baselines using the same features, target,
+gamma, seeds, P/N grid, rolling windows, float64 CUDA solver, trading rule, and fees. The largest
+model still has 107,950 predictors (`P/N=50`), and the 2026 holdout remains sealed.
+
+Run an isolated smoke test first:
+
+```powershell
+python scripts/run_double_descent_phase14.py `
+  --download-data `
+  --smoke-test `
+  --output-dir user_data\research_results\double_descent\phase14_smoke
+```
+
+Then run the full resumable replication without `--smoke-test`:
+
+```powershell
+python scripts/run_double_descent_phase14.py
+```
+
+The full design contains 29 cases and 377 rolling fits. Curve-shape replication is reported
+separately from useful benign overfitting, and trading never determines the replication result.
+See [PHASE14_PLAN.md](PHASE14_PLAN.md).

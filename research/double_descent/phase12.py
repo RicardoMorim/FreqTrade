@@ -143,6 +143,19 @@ def _phase4_config(config: Phase12Config) -> Phase4Config:
     )
 
 
+def _phase3_config(config: Phase12Config) -> Phase3Config:
+    return Phase3Config(
+        data_directory=config.data_directory,
+        python_executable=config.python_executable,
+        pair=config.pair,
+        timeframe=config.timeframe,
+        timerange=config.timerange,
+        train_periods_days=(config.train_period_days,),
+        backtest_period_days=config.backtest_period_days,
+        minimum_windows_per_period=config.minimum_training_windows,
+    )
+
+
 def _case_paths(config: Phase12Config, baseline: str) -> tuple[Path, Path, Path, Path]:
     root = config.output_directory / "runs" / baseline
     return (
@@ -572,15 +585,7 @@ def run_phase12(config: Phase12Config) -> dict[str, Any]:
     run_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     phase4 = _phase4_config(config)
     phase4.validate()
-    phase3 = Phase3Config(
-        data_directory=config.data_directory,
-        python_executable=config.python_executable,
-        timerange=config.timerange,
-        train_periods_days=(config.train_period_days,),
-        backtest_period_days=config.backtest_period_days,
-        minimum_windows_per_period=config.minimum_training_windows,
-    )
-    data_audit = audit_data_coverage(phase3)
+    data_audit = audit_data_coverage(_phase3_config(config))
     market_data = _load_evaluation_market_data(phase4) if data_audit["passed"] else pd.DataFrame()
     results = []
     checkpoint_path = config.output_directory / "checkpoint.json"
