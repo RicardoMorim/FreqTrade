@@ -52,6 +52,7 @@ class _BaselinePredictor:
         feature_mean: np.ndarray | None = None,
         target_standard_deviation: float = 0.0,
         score_standard_deviation: float = 1.0,
+        momentum_24h_scale: float = 24.0,
     ) -> None:
         self.baseline = baseline
         self.coefficient = coefficient
@@ -60,6 +61,7 @@ class _BaselinePredictor:
         self.feature_mean = feature_mean
         self.target_standard_deviation = target_standard_deviation
         self.score_standard_deviation = score_standard_deviation
+        self.momentum_24h_scale = momentum_24h_scale
 
     def predict_scaled(self, features: DataFrame) -> np.ndarray:
         if self.coefficient is None:
@@ -112,7 +114,10 @@ class Phase12BaselineRegressor(BaseRegressionModel):
         if baseline == "momentum_1h":
             return raw[_feature_column(raw, "%-return_1h")].to_numpy(dtype=np.float64)
         if baseline == "momentum_24h":
-            return raw[_feature_column(raw, "%-return_24h")].to_numpy(dtype=np.float64) / 24.0
+            return (
+                raw[_feature_column(raw, "%-return_24h")].to_numpy(dtype=np.float64)
+                / model.momentum_24h_scale
+            )
         if baseline == "volatility_adjusted_momentum_24h":
             score = raw[_feature_column(raw, "%-return_volatility_24h")].to_numpy(dtype=np.float64)
             return score / model.score_standard_deviation * model.target_standard_deviation
@@ -150,6 +155,9 @@ class Phase12BaselineRegressor(BaseRegressionModel):
         model = _BaselinePredictor(
             baseline=baseline,
             target_standard_deviation=target_std,
+            momentum_24h_scale=float(
+                self.model_training_parameters.get("momentum_24h_scale", 24.0)
+            ),
         )
 
         feature_rank = 0
@@ -236,6 +244,9 @@ class Phase12BaselineRegressor(BaseRegressionModel):
             "effective_rank": effective_rank,
             "condition_number": condition_number,
             "ridge_alpha": ridge_alpha if baseline == "market_ridge" else 0.0,
+            "momentum_24h_scale": float(
+                self.model_training_parameters.get("momentum_24h_scale", 24.0)
+            ),
             "train_mse": metrics["mse"],
             "training_total_seconds": time.perf_counter() - started,
             "peak_vram_mib": 0.0,

@@ -24,6 +24,7 @@ from freqtrade.data.btanalysis import load_backtest_stats
 from freqtrade.data.history import load_pair_history
 from freqtrade.enums import CandleType
 from freqtrade.exceptions import OperationalException
+from freqtrade.exchange import timeframe_to_seconds
 from research.double_descent.metrics import prediction_metrics
 from research.double_descent.phase3 import PN_RATIOS, Phase3Config, audit_data_coverage
 
@@ -59,10 +60,15 @@ class Phase4Config:
     chunk_size: int = 4_096
     fee: float = 0.001
     minimum_training_windows: int = 10
+    effective_n_tolerance: int = 0
     subprocess_timeout_seconds: int = 1_800
     interpolation_mse_tolerance: float = 1e-16
     resume: bool = True
     allow_phase3_training_window_variation: bool = False
+    allow_external_design: bool = False
+    label_period_candles: int = 1
+    indicator_periods_candles: tuple[int, ...] = (14,)
+    strategy_name: str = "Phase4RFFStrategy"
     strategy_directory: Path = Path("research/double_descent/freqai")
     model_directory: Path = Path("research/double_descent/freqai")
     models_directory: Path = Path("user_data/models")
@@ -85,8 +91,18 @@ class Phase4Config:
             raise ValueError("gamma/rcond must be positive and ridge must be non-negative")
         if self.dtype not in {"float32", "float64"}:
             raise ValueError("dtype must be float32 or float64")
-        if self.chunk_size < 1 or self.minimum_training_windows < 1:
+        if (
+            self.chunk_size < 1
+            or self.minimum_training_windows < 1
+            or self.effective_n_tolerance < 0
+        ):
             raise ValueError("chunk size and minimum windows must be positive")
+        if self.label_period_candles < 1:
+            raise ValueError("label period must be positive")
+        if not self.indicator_periods_candles or any(
+            period < 1 for period in self.indicator_periods_candles
+        ):
+            raise ValueError("indicator periods must be positive")
         if not 0 <= self.fee < 0.1:
             raise ValueError("fee must be in [0, 0.1)")
         if not self.ratios or any(ratio <= 0 for ratio in self.ratios):
@@ -99,6 +115,14 @@ class Phase4Config:
             raise ValueError("development timerange must end no later than the holdout boundary")
 
     def _validate_training_window(self) -> None:
+        if self.allow_external_design:
+            if (
+                self.train_period_days < 1
+                or self.effective_n < 1
+                or timeframe_to_seconds(self.timeframe) < 1
+            ):
+                raise ValueError("external designs require positive training days and effective N")
+            return
         if self.timeframe != "1h":
             raise ValueError("financial RFF sweeps are frozen to 1h candles")
         if not self.allow_phase3_training_window_variation:
@@ -194,13 +218,13 @@ def build_freqtrade_config(
             "feature_parameters": {
                 "include_timeframes": [config.timeframe],
                 "include_corr_pairlist": [],
-                "label_period_candles": 1,
+                "label_period_candles": config.label_period_candles,
                 "include_shifted_candles": 0,
                 "DI_threshold": 0,
                 "weight_factor": 0,
                 "principal_component_analysis": False,
                 "use_SVM_to_remove_outliers": False,
-                "indicator_periods_candles": [14],
+                "indicator_periods_candles": list(config.indicator_periods_candles),
                 "shuffle_after_split": False,
                 "buffer_train_data_candles": 0,
                 "plot_feature_importances": 0,
@@ -242,8 +266,12 @@ def _load_evaluation_market_data(config: Phase4Config) -> pd.DataFrame:
     )
     dataframe = dataframe.sort_values("date").drop_duplicates("date")
     dataframe = dataframe.loc[(dataframe["date"] >= start) & (dataframe["date"] < end)].copy()
-    dataframe["realized_forward_return"] = dataframe["close"].shift(-1) / dataframe["close"] - 1.0
-    dataframe["momentum_1h_prediction"] = dataframe["close"].pct_change()
+    horizon = config.label_period_candles
+    dataframe["realized_forward_return"] = (
+        dataframe["close"].shift(-horizon) / dataframe["close"] - 1.0
+    )
+    one_hour_bars = max(round(3_600 / timeframe_to_seconds(config.timeframe)), 1)
+    dataframe["momentum_1h_prediction"] = dataframe["close"].pct_change(one_hour_bars)
     return dataframe
 
 
@@ -333,9 +361,12 @@ def evaluate_oos_predictions(
     }
 
 
-def _extract_trading_metrics(backtest_file: Path) -> dict[str, Any]:
+def _extract_trading_metrics(
+    backtest_file: Path,
+    strategy_name: str = "Phase4RFFStrategy",
+) -> dict[str, Any]:
     backtest = load_backtest_stats(backtest_file)
-    stats = backtest["strategy"]["Phase4RFFStrategy"]
+    stats = backtest["strategy"][strategy_name]
     total_trades = int(stats["total_trades"])
     starting_balance = float(stats["starting_balance"])
     return {
@@ -430,16 +461,23 @@ def _finalize_case(
         oos = {"error": str(exc)}
     backtest_files = sorted(backtest_directory.glob("*.zip"))
     try:
-        trading = _extract_trading_metrics(backtest_files[-1]) if backtest_files else {}
+        trading = (
+            _extract_trading_metrics(backtest_files[-1], config.strategy_name)
+            if backtest_files
+            else {}
+        )
     except (KeyError, TypeError, ValueError, OperationalException) as exc:
         trading = {"error": str(exc)}
-    start, end = _parse_timerange(config.timerange)
-    expected_predictions = int((end - start).total_seconds() / 3600) - 1
+    expected_predictions = int(np.isfinite(market_data["realized_forward_return"]).sum())
     integrity = {
         "returncode_zero": returncode == 0,
         "not_timed_out": not timed_out,
         "minimum_training_windows": len(training_records) >= config.minimum_training_windows,
-        "effective_n_matches_phase3": training.get("effective_n_values") == [config.effective_n],
+        "effective_n_matches_phase3": bool(training.get("effective_n_values"))
+        and all(
+            abs(value - config.effective_n) <= config.effective_n_tolerance
+            for value in training["effective_n_values"]
+        ),
         "input_dimension_is_25": training.get("input_feature_counts") == [25],
         "all_oos_predictions_present": oos.get("valid_prediction_rows") == expected_predictions,
         "all_predictions_accepted": oos.get("do_predict_fraction") == 1.0,
@@ -499,6 +537,9 @@ def _recover_case(
                 parameters["dtype"] == config.dtype,
                 freqai["train_period_days"] == config.train_period_days,
                 freqai["backtest_period_days"] == config.backtest_period_days,
+                freqai["feature_parameters"]["label_period_candles"] == config.label_period_candles,
+                generated["timeframe"] == config.timeframe,
+                generated["exchange"]["pair_whitelist"] == [config.pair],
                 generated["fee"] == config.fee,
             )
         )
@@ -560,7 +601,7 @@ def _run_case(
         "--config",
         str(config_path),
         "--strategy",
-        "Phase4RFFStrategy",
+        config.strategy_name,
         "--strategy-path",
         str(config.strategy_directory),
         "--freqaimodel",

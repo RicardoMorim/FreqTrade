@@ -16,6 +16,7 @@ from typing import Any
 from freqtrade.configuration import TimeRange
 from freqtrade.data.history import load_pair_history
 from freqtrade.enums import CandleType
+from freqtrade.exchange import timeframe_to_seconds
 
 
 PN_RATIOS = (
@@ -53,9 +54,13 @@ class Phase3Config:
     backtest_period_days: int = 30
     startup_candles: int = 200
     label_period_candles: int = 1
+    indicator_periods_candles: tuple[int, ...] = (14,)
     minimum_windows_per_period: int = 10
     maximum_gap_fraction: float = 0.005
     subprocess_timeout_seconds: int = 900
+    strategy_name: str = "Phase3EffectiveNStrategy"
+    identifier_prefix: str = "double-descent-phase3"
+    allow_timeframe_variation: bool = False
     strategy_directory: Path = Path("research/double_descent/freqai")
     model_directory: Path = Path("research/double_descent/freqai")
 
@@ -64,8 +69,16 @@ class Phase3Config:
             raise FileNotFoundError(f"data directory does not exist: {self.data_directory}")
         if not Path(self.python_executable).is_file():
             raise FileNotFoundError(f"Python executable does not exist: {self.python_executable}")
-        if self.timeframe != "1h":
+        if not self.allow_timeframe_variation and self.timeframe != "1h":
             raise ValueError("Phase 3 is frozen to the initial 1h experiment")
+        if timeframe_to_seconds(self.timeframe) < 1:
+            raise ValueError("timeframe must resolve to a positive duration")
+        if self.startup_candles < 1 or self.label_period_candles < 1:
+            raise ValueError("startup and label periods must be positive")
+        if not self.indicator_periods_candles or any(
+            period < 1 for period in self.indicator_periods_candles
+        ):
+            raise ValueError("indicator periods must be positive")
         if any(days < 1 for days in self.train_periods_days):
             raise ValueError("training periods must be positive")
         if self.backtest_period_days < 1 or self.minimum_windows_per_period < 1:
@@ -88,8 +101,10 @@ def _parse_timerange(timerange: str) -> tuple[datetime, datetime]:
 def audit_data_coverage(config: Phase3Config) -> dict[str, Any]:
     """Check real, unfilled futures candles before launching FreqAI."""
     backtest_start, backtest_end = _parse_timerange(config.timerange)
+    timeframe_seconds = timeframe_to_seconds(config.timeframe)
     required_start = backtest_start - timedelta(
-        days=max(config.train_periods_days), hours=config.startup_candles
+        days=max(config.train_periods_days),
+        seconds=config.startup_candles * timeframe_seconds,
     )
     requested = TimeRange(
         starttype="date",
@@ -117,14 +132,14 @@ def audit_data_coverage(config: Phase3Config) -> dict[str, Any]:
     dates = dataframe["date"]
     available_start = dates.min().to_pydatetime()
     available_end = dates.max().to_pydatetime()
-    expected_rows = int((available_end - available_start).total_seconds() / 3600) + 1
+    expected_rows = int((available_end - available_start).total_seconds() / timeframe_seconds) + 1
     unique_rows = int(dates.nunique())
     duplicate_rows = len(dates) - unique_rows
     missing_rows = max(expected_rows - unique_rows, 0)
     gap_fraction = missing_rows / expected_rows
     checks = {
         "covers_required_start": available_start <= required_start,
-        "covers_backtest_end": available_end >= backtest_end - timedelta(hours=1),
+        "covers_backtest_end": available_end >= backtest_end - timedelta(seconds=timeframe_seconds),
         "no_duplicate_timestamps": duplicate_rows == 0,
         "gap_fraction_within_limit": gap_fraction <= config.maximum_gap_fraction,
     }
@@ -136,7 +151,8 @@ def audit_data_coverage(config: Phase3Config) -> dict[str, Any]:
         "available_start": available_start.isoformat(),
         "available_end": available_end.isoformat(),
         "loaded_rows": len(dataframe),
-        "expected_hourly_rows": expected_rows,
+        "expected_timeframe_rows": expected_rows,
+        "expected_hourly_rows": expected_rows if config.timeframe == "1h" else None,
         "duplicate_rows": duplicate_rows,
         "missing_rows": missing_rows,
         "gap_fraction": gap_fraction,
@@ -202,7 +218,7 @@ def build_freqtrade_config(
                 "weight_factor": 0,
                 "principal_component_analysis": False,
                 "use_SVM_to_remove_outliers": False,
-                "indicator_periods_candles": [14],
+                "indicator_periods_candles": list(config.indicator_periods_candles),
                 "shuffle_after_split": False,
                 "buffer_train_data_candles": 0,
                 "plot_feature_importances": 0,
@@ -230,7 +246,7 @@ def _run_period(
     log_directory.mkdir(parents=True, exist_ok=True)
     metrics_path = config.output_directory / f"measurements_{train_period_days}d.jsonl"
     metrics_path.unlink(missing_ok=True)
-    identifier = f"double-descent-phase3-{run_id}-{train_period_days}d"
+    identifier = f"{config.identifier_prefix}-{run_id}-{train_period_days}d"
     generated_config = build_freqtrade_config(
         config, train_period_days, identifier, metrics_path, run_id
     )
@@ -244,7 +260,7 @@ def _run_period(
         "--config",
         str(config_path),
         "--strategy",
-        "Phase3EffectiveNStrategy",
+        config.strategy_name,
         "--strategy-path",
         str(config.strategy_directory),
         "--freqaimodel",

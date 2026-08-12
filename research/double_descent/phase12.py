@@ -60,9 +60,16 @@ class Phase12Config:
     ridge_alpha: float = PHASE12_RIDGE_ALPHA
     fee: float = 0.001
     minimum_training_windows: int = 10
+    effective_n_tolerance: int = 0
     subprocess_timeout_seconds: int = 1_800
     resume: bool = True
     smoke_test: bool = False
+    allow_external_design: bool = False
+    label_period_candles: int = 1
+    startup_candles: int = 200
+    indicator_periods_candles: tuple[int, ...] = (14,)
+    strategy_name: str = "Phase4RFFStrategy"
+    momentum_24h_scale: float = 24.0
     strategy_directory: Path = Path("research/double_descent/freqai")
     model_directory: Path = Path("research/double_descent/freqai")
     models_directory: Path = Path("user_data/models")
@@ -101,8 +108,16 @@ class Phase12Config:
             raise ValueError("the full Phase 12 run freezes Ridge alpha=1")
         if self.ridge_alpha <= 0:
             raise ValueError("ridge alpha must be positive")
-        if self.timeframe != "1h" or self.train_period_days != 90 or self.effective_n != 2_159:
+        if not self.allow_external_design and (
+            self.timeframe != "1h" or self.train_period_days != 90 or self.effective_n != 2_159
+        ):
             raise ValueError("Phase 12 is frozen to 1h, 90 days, and measured N=2,159")
+        if self.allow_external_design and (
+            self.train_period_days < 1 or self.effective_n < 1 or self.label_period_candles < 1
+        ):
+            raise ValueError("external baseline designs require positive N and periods")
+        if self.momentum_24h_scale <= 0:
+            raise ValueError("momentum scale must be positive")
         if self.backtest_period_days != 30 or self.minimum_training_windows < 1:
             raise ValueError("invalid rolling evaluation design")
         if not 0 <= self.fee < 0.1:
@@ -135,8 +150,13 @@ def _phase4_config(config: Phase12Config) -> Phase4Config:
         chunk_size=4_096,
         fee=config.fee,
         minimum_training_windows=config.minimum_training_windows,
+        effective_n_tolerance=config.effective_n_tolerance,
         subprocess_timeout_seconds=config.subprocess_timeout_seconds,
         resume=config.resume,
+        allow_external_design=config.allow_external_design,
+        label_period_candles=config.label_period_candles,
+        indicator_periods_candles=config.indicator_periods_candles,
+        strategy_name=config.strategy_name,
         strategy_directory=config.strategy_directory,
         model_directory=config.model_directory,
         models_directory=config.models_directory,
@@ -153,6 +173,11 @@ def _phase3_config(config: Phase12Config) -> Phase3Config:
         train_periods_days=(config.train_period_days,),
         backtest_period_days=config.backtest_period_days,
         minimum_windows_per_period=config.minimum_training_windows,
+        startup_candles=config.startup_candles,
+        label_period_candles=config.label_period_candles,
+        indicator_periods_candles=config.indicator_periods_candles,
+        strategy_name=config.strategy_name,
+        allow_timeframe_variation=config.allow_external_design,
     )
 
 
@@ -211,8 +236,12 @@ def _recover_case(
             (
                 parameters["baseline"] == baseline,
                 parameters["ridge_alpha"] == config.ridge_alpha,
+                parameters.get("momentum_24h_scale", 24.0) == config.momentum_24h_scale,
                 freqai["train_period_days"] == config.train_period_days,
                 freqai["backtest_period_days"] == config.backtest_period_days,
+                freqai["feature_parameters"]["label_period_candles"] == config.label_period_candles,
+                generated["timeframe"] == config.timeframe,
+                generated["exchange"]["pair_whitelist"] == [config.pair],
                 generated["fee"] == config.fee,
             )
         ):
@@ -274,6 +303,7 @@ def _run_case(
             "phase12_run_id": run_id,
             "baseline": baseline,
             "ridge_alpha": config.ridge_alpha,
+            "momentum_24h_scale": config.momentum_24h_scale,
         }
     )
     config_path.write_text(json.dumps(generated, indent=2), encoding="utf-8")
@@ -285,7 +315,7 @@ def _run_case(
         "--config",
         str(config_path),
         "--strategy",
-        "Phase4RFFStrategy",
+        config.strategy_name,
         "--strategy-path",
         str(config.strategy_directory),
         "--freqaimodel",

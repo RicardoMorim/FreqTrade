@@ -99,10 +99,16 @@ class Phase10Config:
     chunk_size: int = 4_096
     fee: float = 0.001
     minimum_training_windows: int = 10
+    effective_n_tolerance: int = 0
     minimum_seed_count: int = 3
     subprocess_timeout_seconds: int = 1_800
     resume: bool = True
     smoke_test: bool = False
+    allow_external_design: bool = False
+    label_period_candles: int = 1
+    startup_candles: int = 200
+    indicator_periods_candles: tuple[int, ...] = (14,)
+    strategy_name: str = "Phase4RFFStrategy"
     strategy_directory: Path = Path("research/double_descent/freqai")
     model_directory: Path = Path("research/double_descent/freqai")
     models_directory: Path = Path("user_data/models")
@@ -204,8 +210,13 @@ def _phase4_config(
         chunk_size=config.chunk_size,
         fee=config.fee,
         minimum_training_windows=config.minimum_training_windows,
+        effective_n_tolerance=config.effective_n_tolerance,
         subprocess_timeout_seconds=config.subprocess_timeout_seconds,
         resume=config.resume,
+        allow_external_design=config.allow_external_design,
+        label_period_candles=config.label_period_candles,
+        indicator_periods_candles=config.indicator_periods_candles,
+        strategy_name=config.strategy_name,
         strategy_directory=config.strategy_directory,
         model_directory=config.model_directory,
         models_directory=config.models_directory,
@@ -222,6 +233,11 @@ def _phase3_config(config: Phase10Config) -> Phase3Config:
         train_periods_days=(config.train_period_days,),
         backtest_period_days=config.backtest_period_days,
         minimum_windows_per_period=config.minimum_training_windows,
+        startup_candles=config.startup_candles,
+        label_period_candles=config.label_period_candles,
+        indicator_periods_candles=config.indicator_periods_candles,
+        strategy_name=config.strategy_name,
+        allow_timeframe_variation=config.allow_external_design,
     )
 
 
@@ -310,6 +326,9 @@ def _recover_case(
                 parameters["dtype"] == config.dtype,
                 freqai["train_period_days"] == config.train_period_days,
                 freqai["backtest_period_days"] == config.backtest_period_days,
+                freqai["feature_parameters"]["label_period_candles"] == config.label_period_candles,
+                generated["timeframe"] == config.timeframe,
+                generated["exchange"]["pair_whitelist"] == [config.pair],
                 generated["fee"] == config.fee,
             )
         )
@@ -375,7 +394,7 @@ def _run_case(
         "--config",
         str(config_path),
         "--strategy",
-        "Phase4RFFStrategy",
+        config.strategy_name,
         "--strategy-path",
         str(config.strategy_directory),
         "--freqaimodel",
