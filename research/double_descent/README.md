@@ -481,3 +481,37 @@ the best market RFF at `P/N >= 5` was 4.52 times worse. Every active strategy, i
 money after fees. The independent CPU OLS also reproduced the Phase 10 CUDA raw-linear anchor to
 numerical tolerance. Complexity is therefore not justified by prediction or trading evidence in
 the development sample. See [PHASE12_RESULTS.md](PHASE12_RESULTS.md).
+
+## Phase 13: causal market-regime decomposition
+
+Phase 13 tests whether the Phase 10 double-descent curve or any apparent predictability is
+concentrated in a particular market state. It does not fit new models. Instead, it assigns every
+frozen 2025 OOS prediction to regimes known at prediction time.
+
+Trend is the trailing 30-day log return divided by trailing 30-day realized volatility: at least
+`+0.5` is bull, at most `-0.5` is bear, and the middle is sideways. Volatility is high when the
+trailing 30-day value exceeds its prior 60-day rolling median and low otherwise. The five marginal
+regimes are primary; the six trend/volatility intersections are descriptive. Frozen sample floors
+are 500 observations per marginal cell and 250 per joint cell.
+
+Prediction inference uses a 24-hour Bartlett HAC variance and Benjamini-Hochberg FDR control at 5%
+for 135 non-zero-model comparisons against zero MSE. Regimes never alter predictions or trades,
+and costed PnL is only attributed after the fact. The 2026 holdout remains sealed.
+
+### Run
+
+```powershell
+python scripts/run_double_descent_phase13.py `
+  --data-dir user_data\data\binance
+```
+
+The marginal analysis completed over all 8,759 OOS targets. Double descent appeared in bull, bear,
+sideways, high-volatility, and low-volatility regimes in all three seeds, but 0/105 market-RFF
+regime cells beat zero MSE; all 105 were significantly worse after HAC/FDR. At `P/N=50`, regime
+MSE remained 3.07-6.86 times zero. All 28 active models lost money overall.
+
+The full adequacy gate did not pass because `bull_high_volatility` had only 91 observations versus
+the frozen 250 minimum. Its apparently favorable OLS result is quarantined as insufficient rather
+than changing thresholds after seeing the data. The robust curve shape is therefore not
+regime-concentrated, while useful benign overfitting remains unsupported. See
+[PHASE13_RESULTS.md](PHASE13_RESULTS.md).
