@@ -14,6 +14,7 @@ from research.double_descent.freqai.Phase15TimeframeStrategy import (
 from research.double_descent.phase4 import (
     Phase4Config,
     _load_evaluation_market_data,
+    _records_for_identifier,
     build_freqtrade_config,
 )
 from research.double_descent.phase15 import (
@@ -28,6 +29,7 @@ from research.double_descent.phase15 import (
     PHASE15_STUDIES,
     Phase15Config,
     _baseline_names,
+    _input_dimension_is_25,
     _phase10_config,
     _phase12_config,
     _rff_tasks,
@@ -102,6 +104,27 @@ def test_primary_and_control_case_counts_are_predeclared(tmp_path: Path) -> None
     assert _baseline_names(config, control) == PHASE15_CONTROL_BASELINES
     assert PHASE15_BENCHMARK_RATIOS == (0.1, 1.0, 50.0)
     assert PHASE15_CONTROL_RATIOS == (0.1, 1.0, 1.02, 5.0, 50.0)
+
+
+def test_phase15_gate_reads_feature_dimension_from_raw_training_diagnostics(
+) -> None:
+    assert _input_dimension_is_25(
+        [{"training": {"input_feature_counts": [25]}}]
+    )
+    assert not _input_dimension_is_25(
+        [{"training": {"input_feature_counts": [24]}}]
+    )
+    assert not _input_dimension_is_25([])
+
+
+def test_training_recovery_ignores_diagnostics_from_interrupted_attempts() -> None:
+    records = [
+        {"identifier": "interrupted", "effective_n": 8_639},
+        {"identifier": "completed", "effective_n": 8_638},
+        {"identifier": "completed", "effective_n": 8_639},
+    ]
+
+    assert _records_for_identifier(records, "completed") == records[1:]
 
 
 def test_full_design_cannot_drop_gold_after_results_are_seen(tmp_path: Path) -> None:

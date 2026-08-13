@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from research.double_descent.phase10 import (
     PHASE10_SEEDS,
     Phase10Config,
     _composition_counts,
+    _run_substudy,
     _task_grid,
 )
 from research.double_descent.rff_cuda_worker import iter_stateless_noise_features
@@ -106,6 +108,29 @@ def test_feature_composition_preserves_total_p() -> None:
     assert _composition_counts("market_rff", 2_159) == (0, 0)
     assert _composition_counts("pure_noise", 2_159) == (0, 2_159)
     assert _composition_counts("market_plus_noise", 2_159) == (25, 2_134)
+
+
+def test_resume_reuses_a_complete_passed_substudy(tmp_path: Path) -> None:
+    output = tmp_path / "phase10"
+    summary_path = output / "runs" / "market_rff" / "seed-42" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    cached = {
+        "representation": "market_rff",
+        "seed": 42,
+        "ratios": [1.0, 2.0],
+        "results": [{"success": True}, {"success": True}],
+        "gate": {"passed": True},
+    }
+    summary_path.write_text(json.dumps(cached), encoding="utf-8")
+    config = Phase10Config(
+        data_directory=tmp_path,
+        output_directory=output,
+        resume=True,
+    )
+
+    recovered = _run_substudy(config, "market_rff", 42, (1.0, 2.0), "new-run")
+
+    assert recovered == cached
 
 
 def test_cuda_noise_worker_interpolates_and_is_repeatable(tmp_path: Path) -> None:

@@ -397,6 +397,13 @@ def _read_training_records(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _records_for_identifier(
+    records: list[dict[str, Any]], identifier: str
+) -> list[dict[str, Any]]:
+    """Exclude diagnostics left by an interrupted or concurrent case attempt."""
+    return [row for row in records if row.get("identifier") == identifier]
+
+
 def _aggregate_training_diagnostics(
     records: list[dict[str, Any]], interpolation_tolerance: float
 ) -> dict[str, Any]:
@@ -451,7 +458,9 @@ def _finalize_case(
     recovered: bool = False,
 ) -> dict[str, Any]:
     feature_count = feature_count_for_ratio(ratio, config.effective_n)
-    training_records = _read_training_records(metrics_path)
+    training_records = _records_for_identifier(
+        _read_training_records(metrics_path), identifier
+    )
     training = _aggregate_training_diagnostics(training_records, config.interpolation_mse_tolerance)
     prediction_directory = config.models_directory / identifier / "backtesting_predictions"
     predictions = _read_predictions(prediction_directory)

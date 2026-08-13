@@ -569,6 +569,11 @@ def run_phase15_benchmark(config: Phase15Config) -> dict[str, Any]:
         PHASE15_BENCHMARK_RATIOS,
         run_id,
     )
+    benchmark_effective_n_values = [
+        int(value)
+        for result in substudy.get("results", [])
+        for value in result.get("training", {}).get("effective_n_values", [])
+    ]
     rows = flatten_substudies([substudy])
     device = _cuda_device_info(config)
     maximum_vram = max((float(row["train_peak_vram_mib"]) for row in rows), default=math.inf)
@@ -576,13 +581,10 @@ def run_phase15_benchmark(config: Phase15Config) -> dict[str, Any]:
     checks = {
         "all_benchmark_cases_passed": substudy.get("gate", {}).get("passed") is True,
         "all_three_compute_boundaries_observed": len(rows) == len(PHASE15_BENCHMARK_RATIOS),
-        "effective_n_matches_preparation": bool(rows)
+        "effective_n_matches_preparation": bool(benchmark_effective_n_values)
         and all(
-            all(
-                abs(value - effective_n) <= PHASE15_EFFECTIVE_N_TOLERANCE
-                for value in row["train_effective_n_values"]
-            )
-            for row in rows
+            abs(value - effective_n) <= PHASE15_EFFECTIVE_N_TOLERANCE
+            for value in benchmark_effective_n_values
         ),
         "maximum_case_within_timeout": maximum_seconds <= config.benchmark_max_case_seconds,
         "peak_vram_within_budget": maximum_vram
@@ -830,6 +832,13 @@ def compare_frequency_results(
     }
 
 
+def _input_dimension_is_25(results: list[dict[str, Any]]) -> bool:
+    return bool(results) and all(
+        result.get("training", {}).get("input_feature_counts") == [25]
+        for result in results
+    )
+
+
 def evaluate_phase15_gate(
     config: Phase15Config,
     preparation: dict[str, Any],
@@ -896,8 +905,7 @@ def evaluate_phase15_gate(
             )
             for result, row in zip(all_results, all_rows, strict=True)
         ),
-        "input_dimension_is_25": bool(all_rows)
-        and all(row["train_input_feature_counts"] == [25] for row in all_rows),
+        "input_dimension_is_25": _input_dimension_is_25(all_results),
         "all_prediction_metrics_finite": bool(all_rows)
         and all(
             math.isfinite(float(row[key]))

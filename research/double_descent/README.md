@@ -541,3 +541,31 @@ python scripts/run_double_descent_phase14.py
 The full design contains 29 cases and 377 rolling fits. Curve-shape replication is reported
 separately from useful benign overfitting, and trading never determines the replication result.
 See [PHASE14_PLAN.md](PHASE14_PLAN.md).
+
+## Phase 15: 15-minute frequency robustness
+
+Phase 15 repeats the frozen experiment at 15 minutes on BTC, ETH, and the PAXG tokenized-gold
+proxy. The primary target is the next 15-minute return; a sparse matched one-hour target separates
+sampling-frequency effects from horizon effects. The complete design contains 117 cases and uses
+up to 431,950 predictors (`P/N=50`).
+
+```powershell
+python scripts/run_double_descent_phase15.py --stage run
+```
+
+The final run passed all gates: 117/117 cases and 1,287/1,287 rolling fits. Double-descent geometry
+replicated on all three assets and all three primary seeds, but no RFF beat zero-return MSE. See
+[PHASE15_PLAN.md](PHASE15_PLAN.md) and [PHASE15_RESULTS.md](PHASE15_RESULTS.md).
+
+## Phase 16: economic robustness and execution costs
+
+Phase 16 reprices all 87 primary Phase 15 cases without changing positions, directions, or
+timestamps. Six frozen scenarios isolate price PnL, funding, fees, and deterministic slippage.
+
+```powershell
+python scripts/run_double_descent_phase16.py
+```
+
+All 522 case/scenario rows passed the integrity gate and exactly reproduced native Freqtrade PnL
+at the reference cost. No RFF survived even the optimistic 7.5 bps-per-side scenario. See
+[PHASE16_PLAN.md](PHASE16_PLAN.md) and [PHASE16_RESULTS.md](PHASE16_RESULTS.md).

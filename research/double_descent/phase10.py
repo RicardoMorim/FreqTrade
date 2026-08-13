@@ -489,6 +489,27 @@ def _run_substudy(
     run_id: str,
 ) -> dict[str, Any]:
     output_directory = config.output_directory / "runs" / representation / f"seed-{seed}"
+    summary_path = output_directory / "summary.json"
+    if config.resume and summary_path.is_file():
+        try:
+            cached = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cached = {}
+        cached_results = cached.get("results", [])
+        if (
+            cached.get("representation") == representation
+            and cached.get("seed") == seed
+            and cached.get("ratios") == list(ratios)
+            and cached.get("gate", {}).get("passed") is True
+            and len(cached_results) == len(ratios)
+            and all(result.get("success") is True for result in cached_results)
+        ):
+            print(
+                f"PHASE10 RECOVERED SUBSTUDY representation={representation} "
+                f"seed={seed} points={len(ratios)}",
+                flush=True,
+            )
+            return cached
     phase4 = _phase4_config(
         config,
         representation,
@@ -521,7 +542,6 @@ def _run_substudy(
     )
     gate["passed"] = all(gate["checks"].values())
     output_directory.mkdir(parents=True, exist_ok=True)
-    summary_path = output_directory / "summary.json"
     summary = {
         "phase": 10,
         "scope": "one frozen representation/seed rolling FreqAI substudy",
