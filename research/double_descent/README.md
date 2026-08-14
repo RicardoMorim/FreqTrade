@@ -623,3 +623,25 @@ roughly half the spectral rank and erased the peak, demonstrating implicit numer
 regularization rather than precision-invariant double descent. Neither precision beat the
 zero-return forecast. The 2026 holdout remained sealed. See [PHASE19_PLAN.md](PHASE19_PLAN.md) and
 [PHASE19_RESULTS.md](PHASE19_RESULTS.md).
+
+## Phase 20: effective statistical dimension
+
+Phase 20 compares nominal RFF width `P` with the spectral participation ratio of the centered
+training Gram matrix. It is a frozen post-processing audit of completed Phase 6, 10, and 15
+artifacts: no new model is fitted, prediction and trading results do not enter the gate, and the
+2026 holdout remains sealed.
+
+```powershell
+python scripts/run_double_descent_phase20.py
+```
+
+All 173/173 expected diagnostic rows passed the integrity gate. At matched `P/N=50` in Phase 10,
+market RFF had effective rank 75.5, versus 2,115.7 for pure noise and market plus noise. At 15m,
+`P=431,950` collapsed to effective rank 59-65 across BTC, ETH, and the PAXG gold proxy, only
+0.69-0.75% of `N`. The one-million-feature Phase 6 model had effective rank 23.761, within 0.052%
+of its exact `gamma=0.2` RBF kernel, or roughly 42,086 nominal predictors per effective dimension.
+
+Nominal width, retained algebraic rank, and effective spectral dimension are therefore materially
+different. Extreme `P/N` in this project provides interpolation capacity but not hundreds of
+thousands of independent market directions, and the result is not evidence of alpha. See
+[PHASE20_PLAN.md](PHASE20_PLAN.md) and [PHASE20_RESULTS.md](PHASE20_RESULTS.md).
