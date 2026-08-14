@@ -604,3 +604,22 @@ target/runtime tail flags were retained, with no market-feature or unknown looka
 are quarantined only because Phase 17 independently found zero entry and exit mismatches. The 2026
 holdout remained sealed. See [PHASE18_PLAN.md](PHASE18_PLAN.md) and
 [PHASE18_RESULTS.md](PHASE18_RESULTS.md).
+
+## Phase 19: numerical stability at interpolation
+
+Phase 19 captures one genuine processed FreqAI window and challenges the five critical P/N points
+around interpolation with repeated CUDA float64, CUDA float32, and independent full-N CPU/SVD
+references at `P/N=1`.
+
+```powershell
+python scripts/run_double_descent_phase19.py --stage all
+```
+
+All 15 cases completed and float64 was bitwise repeatable. The float64 MSE peak reappeared exactly
+at `P/N=1`, where the median condition number reached 434,647. CPU and CUDA had the same rank and
+passed the relative-error gate for all seeds, but the most ill-conditioned seed exceeded the
+predeclared maximum-absolute tolerance, so the strict Phase 19 gate did not pass. Float32 removed
+roughly half the spectral rank and erased the peak, demonstrating implicit numerical
+regularization rather than precision-invariant double descent. Neither precision beat the
+zero-return forecast. The 2026 holdout remained sealed. See [PHASE19_PLAN.md](PHASE19_PLAN.md) and
+[PHASE19_RESULTS.md](PHASE19_RESULTS.md).
