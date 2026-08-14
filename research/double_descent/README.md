@@ -586,3 +586,21 @@ native representatives analyzed 20 signals with zero biased entries, zero biased
 actionable biased indicators. Raw Freqtrade target/runtime tail flags are retained and adjudicated
 only under the frozen zero-trade-mismatch rule. The 2026 holdout remained sealed. See
 [PHASE17_PLAN.md](PHASE17_PLAN.md) and [PHASE17_RESULTS.md](PHASE17_RESULTS.md).
+
+## Phase 18: native recursive-indicator audit
+
+Phase 18 applies Freqtrade's native `recursive-analysis` to the same nine predeclared causal paths.
+It varies startup history over seven values from 199 to the exchange-safe maximum of 2,494 candles,
+with the strategy's configured 801 candles retained as the frozen decision point.
+
+```powershell
+python scripts/run_double_descent_phase18.py --stage run
+```
+
+The complete run passed all gates. All 117 source configurations retained static coverage, all
+9/9 native representatives completed, and all 225 market-feature checks at startup 801 had zero
+relative variance. Native Freqtrade reported no recursive indicators. Its four known FreqAI
+target/runtime tail flags were retained, with no market-feature or unknown lookahead finding; they
+are quarantined only because Phase 17 independently found zero entry and exit mismatches. The 2026
+holdout remained sealed. See [PHASE18_PLAN.md](PHASE18_PLAN.md) and
+[PHASE18_RESULTS.md](PHASE18_RESULTS.md).
