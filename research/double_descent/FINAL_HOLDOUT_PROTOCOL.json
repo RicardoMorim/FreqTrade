@@ -1,0 +1,242 @@
+{
+  "design": {
+    "assets": [
+      {
+        "alias": "btc",
+        "asset_class": "crypto",
+        "comparison_scope": "common_2026_ytd_holdout",
+        "expected_training_windows": 8,
+        "label": "BTC",
+        "minimum_training_windows": 8,
+        "pair": "BTC/USDT:USDT",
+        "timerange": "20260101-20260801"
+      },
+      {
+        "alias": "eth",
+        "asset_class": "crypto",
+        "comparison_scope": "common_2026_ytd_holdout",
+        "expected_training_windows": 8,
+        "label": "ETH",
+        "minimum_training_windows": 8,
+        "pair": "ETH/USDT:USDT",
+        "timerange": "20260101-20260801"
+      },
+      {
+        "alias": "gold",
+        "asset_class": "tokenized_gold_proxy",
+        "comparison_scope": "common_2026_ytd_holdout",
+        "expected_training_windows": 8,
+        "label": "PAXG gold proxy",
+        "minimum_training_windows": 8,
+        "pair": "PAXG/USDT:USDT",
+        "timerange": "20260101-20260801"
+      }
+    ],
+    "backtest_period_days": 30,
+    "baselines": [
+      "zero_return",
+      "historical_mean",
+      "market_ols",
+      "market_ridge",
+      "momentum_1h",
+      "momentum_24h",
+      "volatility_adjusted_momentum_24h",
+      "buy_and_hold"
+    ],
+    "control_baselines": [
+      "zero_return",
+      "market_ols",
+      "market_ridge",
+      "momentum_1h",
+      "momentum_24h"
+    ],
+    "control_ratios": [
+      0.1,
+      1.0,
+      1.02,
+      5.0,
+      50.0
+    ],
+    "cost_scenarios": [
+      {
+        "fee_per_side": 0.0,
+        "funding_multiplier": 0.0,
+        "name": "price_only",
+        "role": "decomposition_control",
+        "slippage_per_side": 0.0
+      },
+      {
+        "fee_per_side": 0.0,
+        "funding_multiplier": 1.0,
+        "name": "funding_only",
+        "role": "decomposition_control",
+        "slippage_per_side": 0.0
+      },
+      {
+        "fee_per_side": 0.0005,
+        "funding_multiplier": 1.0,
+        "name": "optimistic",
+        "role": "cost_sensitivity",
+        "slippage_per_side": 0.00025
+      },
+      {
+        "fee_per_side": 0.001,
+        "funding_multiplier": 1.0,
+        "name": "phase15_reference",
+        "role": "native_reproduction",
+        "slippage_per_side": 0.0
+      },
+      {
+        "fee_per_side": 0.001,
+        "funding_multiplier": 1.0,
+        "name": "conservative",
+        "role": "cost_sensitivity",
+        "slippage_per_side": 0.0005
+      },
+      {
+        "fee_per_side": 0.002,
+        "funding_multiplier": 1.0,
+        "name": "stress",
+        "role": "cost_sensitivity",
+        "slippage_per_side": 0.001
+      }
+    ],
+    "data_timerange": "20250924-20260801",
+    "dtype": "float64",
+    "effective_n": {
+      "matched_1h_control": 8636,
+      "native_15m": 8639
+    },
+    "expected_windows_per_case": 8,
+    "fee_per_side": 0.001,
+    "gamma": 0.5,
+    "map_ratios": [
+      0.1,
+      0.5,
+      0.9,
+      0.98,
+      1.0,
+      1.02,
+      1.1,
+      2.0,
+      5.0,
+      10.0,
+      50.0
+    ],
+    "performance_never_changes_integrity_gate": true,
+    "prediction_test": {
+      "fdr_alpha": 0.05,
+      "lag_candles": 96,
+      "method": "two-sided Bartlett-HAC MSE loss differential versus zero",
+      "multiple_testing": "Benjamini-Hochberg over all non-zero prediction cases"
+    },
+    "primary_inference": "prediction metrics; trading remains downstream",
+    "ridge": 0.0,
+    "ridge_alpha": 1.0,
+    "robustness_ratios": [
+      0.1,
+      1.0,
+      1.02,
+      5.0,
+      50.0
+    ],
+    "seeds": [
+      20260810,
+      1898170439,
+      3432960257
+    ],
+    "studies": [
+      {
+        "label_period_candles": 1,
+        "name": "native_15m",
+        "role": "primary",
+        "target_minutes": 15
+      },
+      {
+        "label_period_candles": 4,
+        "name": "matched_1h_control",
+        "role": "diagnostic_control",
+        "target_minutes": 60
+      }
+    ],
+    "timeframe": "15m",
+    "train_period_days": 90
+  },
+  "development_status": {
+    "15": {
+      "gate_passed": true,
+      "holdout_used": false
+    },
+    "16": {
+      "gate_passed": true,
+      "holdout_used": false
+    },
+    "17": {
+      "gate_passed": true,
+      "holdout_used": false
+    },
+    "18": {
+      "gate_passed": true,
+      "holdout_used": false
+    },
+    "19": {
+      "gate_passed": false,
+      "holdout_used": false
+    },
+    "20": {
+      "gate_passed": true,
+      "holdout_used": false
+    }
+  },
+  "expected_counts": {
+    "baseline_cases": 39,
+    "cost_rows": 522,
+    "economic_cases": 87,
+    "rff_cases": 78,
+    "rolling_fits": 936,
+    "total_cases": 117
+  },
+  "frozen_at_utc": "2026-08-14T12:12:21.271739+00:00",
+  "holdout": {
+    "end_exclusive": "2026-08-01T00:00:00Z",
+    "evaluation": "prequential 90-day train / 30-day predict rolling windows",
+    "full_calendar_year": false,
+    "label": "2026 YTD through the last complete month available at freeze time",
+    "start_inclusive": "2026-01-01T00:00:00Z",
+    "timerange": "20260101-20260801"
+  },
+  "holdout_accessed_when_frozen": false,
+  "phase19_quarantine": "The complete protocol ran, but its strict gate failed one CPU maximum-absolute tolerance near P/N=1. Final interpolation points remain numerically qualified.",
+  "protocol": "supervised_double_descent_final_holdout",
+  "protocol_parent_commit": "341086c468d574b04380b257d23f08a7b6d8bf48",
+  "protocol_version": 1,
+  "reference_sha256": {
+    "user_data/research_results/double_descent/phase10/representation_map.csv": "2ddaf25c0b90359eb5836cac7d7a0db77c67809be6b75f7029f3d2449b627a5c",
+    "user_data/research_results/double_descent/phase10/summary.json": "4e40d23d91ff104a0446c6396e9c4e58ad534dc027860e6e7ccfdea457f87d76",
+    "user_data/research_results/double_descent/phase11/summary.json": "6b910f14f9734114c051b4b7e4ad676685505568eed78aa23051349c61dc85f4",
+    "user_data/research_results/double_descent/phase15/summary.json": "1e611b55e7f3cf744bea410f794d7278af4d8305f32bfb1227d4821346ac245e",
+    "user_data/research_results/double_descent/phase16/summary.json": "f7c8030f17ea630ae42aa7ad871b3bf8e4157febfcae19f35d1f1ead624276f1",
+    "user_data/research_results/double_descent/phase17/summary.json": "b295945bf1b66e7cb63aff5060cbb2199f04888a16cede125f4ef4c4bed19eb0",
+    "user_data/research_results/double_descent/phase18/summary.json": "6539bc7d008a3ee6c6871c3c8f078de935be9d5aef0ab0d3ccc144b1497e799b",
+    "user_data/research_results/double_descent/phase19/summary.json": "82232e5c7046708ad9a384a737b72acb1c8110853a8540d3e055c20abbabbe50",
+    "user_data/research_results/double_descent/phase20/summary.json": "14e6b3562dd31e0269e9c542899699a8695407570d70faaaf0c34c010f398b77",
+    "user_data/research_results/double_descent/phase9/frozen_gamma.json": "fffa50f066cc34925d6d0e596efa8e3ec85e415f179d425c222fa97ce560c577",
+    "user_data/research_results/double_descent/phase9/summary.json": "04ed38db2c3e17df8245c072249d2b5614b0f6fa1665e0b4e617f4f6ccf6a710"
+  },
+  "source_sha256": {
+    "research/double_descent/final_holdout.py": "d7c095fee31ad9b4dc60f7644195cda32935017bacc8e2548cdec3ca73f2dee5",
+    "research/double_descent/freqai/Phase12BaselineRegressor.py": "6aa3b8df830353b4e6b17de56ebd792c2ffe60c277a55fc9bdfe8f78d82de5a1",
+    "research/double_descent/freqai/Phase15TimeframeStrategy.py": "d5edf2c1e7fb03d38fc4a7511622cd150d38a0a539f282c49d38ff3f17aad125",
+    "research/double_descent/freqai/Phase4CudaRFFRegressor.py": "4cd1418f54e79a8da938f7a1f06d9b275fcaf29b38545bb935bbc379162dddb7",
+    "research/double_descent/metrics.py": "3ae4caee9baa971b87de8386031abfa4eafec6e9a4b276451505e170cf6dbe88",
+    "research/double_descent/phase10.py": "19f57abdc56350730c854ba35bb0696df9f96e17ee756e2a7a9f4aa63175b8fc",
+    "research/double_descent/phase12.py": "1c3b0de23b30bde53ac0834fe5740471bd15bcc1d8647fe02ca8716e4804bca9",
+    "research/double_descent/phase13.py": "2ef542942c3936cb39b992fed052ee630a2c4d09069ccb69f14a0f7dc5bbf261",
+    "research/double_descent/phase15.py": "11762174a0a6ad874b943db4262388e28e9f460be44ca02d5d72c13fcc26f19b",
+    "research/double_descent/phase16.py": "959734119777fda974101d71c3d8550034c04f9446fa25148b78abe03795b35c",
+    "research/double_descent/phase3.py": "2310094c4d0cc6755b0a60ca82c1bb34eb0591e3e0c6be92c38c3f4e8c44684b",
+    "research/double_descent/phase4.py": "97ffa1b61e4ee3a6e949c86d3cb61411cbf7c66d935132f664e3f54cc7134e6b",
+    "research/double_descent/rff_cuda_worker.py": "ef6546364b6f70f1ed61366db99ce5d4457036213fedec4315d9570a8a2bdbe7",
+    "scripts/run_double_descent_final_holdout.py": "4f733b14a261149e17cca24bc6c8da5cac513bec4327f6fad79571808104b295"
+  }
+}
