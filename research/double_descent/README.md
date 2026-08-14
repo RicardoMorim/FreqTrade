@@ -569,3 +569,20 @@ python scripts/run_double_descent_phase16.py
 All 522 case/scenario rows passed the integrity gate and exactly reproduced native Freqtrade PnL
 at the reference cost. No RFF survived even the optimistic 7.5 bps-per-side scenario. See
 [PHASE16_PLAN.md](PHASE16_PLAN.md) and [PHASE16_RESULTS.md](PHASE16_RESULTS.md).
+
+## Phase 17: native lookahead-bias audit
+
+Phase 17 applies Freqtrade's native sliced-backtest `lookahead-analysis` to every distinct causal
+path in the frozen Phase 15 pipeline. All 117 source configurations are audited, while nine
+predeclared native representatives cover RFF across BTC, ETH, PAXG and both target horizons, plus
+every active OLS, Ridge, and momentum branch.
+
+```powershell
+python scripts/run_double_descent_phase17.py --stage run
+```
+
+The complete run passed all gates. All 117 configurations passed the static audit, and all 9/9
+native representatives analyzed 20 signals with zero biased entries, zero biased exits, and no
+actionable biased indicators. Raw Freqtrade target/runtime tail flags are retained and adjudicated
+only under the frozen zero-trade-mismatch rule. The 2026 holdout remained sealed. See
+[PHASE17_PLAN.md](PHASE17_PLAN.md) and [PHASE17_RESULTS.md](PHASE17_RESULTS.md).

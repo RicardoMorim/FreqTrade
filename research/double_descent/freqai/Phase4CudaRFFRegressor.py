@@ -64,6 +64,10 @@ class _CudaWorkerClient:
         self._closed = False
         atexit.register(self.close)
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def _request(self, command: str, **payload: Any) -> dict[str, Any]:
         if self._closed or self._process.stdin is None or self._process.stdout is None:
             raise RuntimeError("CUDA worker is closed")
@@ -156,11 +160,16 @@ class _CudaWorkerClient:
 
 
 class _CudaRFFPredictor:
-    def __init__(self, client: _CudaWorkerClient) -> None:
+    def __init__(self, client: _CudaWorkerClient, close_after_predict: bool = False) -> None:
         self._client = client
+        self._close_after_predict = close_after_predict
 
     def predict(self, features: DataFrame) -> np.ndarray:
-        return self._client.predict(features.to_numpy())
+        try:
+            return self._client.predict(features.to_numpy())
+        finally:
+            if self._close_after_predict:
+                self._client.close()
 
 
 class Phase4CudaRFFRegressor(BaseRegressionModel):
@@ -179,7 +188,7 @@ class Phase4CudaRFFRegressor(BaseRegressionModel):
         return super().train(unfiltered_df, pair, dk, **kwargs)
 
     def _get_client(self) -> _CudaWorkerClient:
-        if not hasattr(self, "_phase4_client"):
+        if not hasattr(self, "_phase4_client") or self._phase4_client.closed:
             metrics_path = Path(self.model_training_parameters["phase4_metrics_path"])
             worker_log = metrics_path.with_name(metrics_path.stem + "_cuda_worker.log")
             self._phase4_client = _CudaWorkerClient(
@@ -248,4 +257,11 @@ class Phase4CudaRFFRegressor(BaseRegressionModel):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
-        return _CudaRFFPredictor(client)
+        return _CudaRFFPredictor(
+            client,
+            close_after_predict=bool(
+                self.model_training_parameters.get(
+                    "phase17_close_cuda_worker_after_predict", False
+                )
+            ),
+        )
