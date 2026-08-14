@@ -645,3 +645,21 @@ Nominal width, retained algebraic rank, and effective spectral dimension are the
 different. Extreme `P/N` in this project provides interpolation capacity but not hundreds of
 thousands of independent market directions, and the result is not evidence of alpha. See
 [PHASE20_PLAN.md](PHASE20_PLAN.md) and [PHASE20_RESULTS.md](PHASE20_RESULTS.md).
+
+## Final 2026 YTD holdout and study conclusion
+
+The one-shot final holdout copied the complete Phase 15 design, froze it in Git, and only then
+opened data from 2026-01-01 through 2026-07-31. It completed 78 RFF cases, 39 baselines, 936 rolling
+fits, and 522 cost repricings across BTC, ETH, and the PAXG gold proxy. Models reached 431,950
+predictors (`P/N=50`). Every final integrity gate passed.
+
+Double-descent geometry replicated on all three assets and all primary seeds, but useful benign
+overfitting did not. No final RFF beat zero-return MSE; 0/108 non-zero prediction cases were
+significantly better than zero after HAC/FDR, while 105/108 were significantly worse. No RFF
+survived even the optimistic executable-cost scenario. The project therefore supports a robust
+representation-level interpolation phenomenon, not financial alpha, useful return prediction, or
+tradable profitability.
+
+See [FINAL_HOLDOUT_PROTOCOL.md](FINAL_HOLDOUT_PROTOCOL.md),
+[FINAL_HOLDOUT_RESULTS.json](FINAL_HOLDOUT_RESULTS.json), and
+[FINAL_STUDY_REPORT.md](FINAL_STUDY_REPORT.md).

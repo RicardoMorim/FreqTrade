@@ -1,0 +1,97 @@
+{
+  "experiment": "supervised_double_descent_final_holdout",
+  "run_id": "20260814T121525Z-final-holdout",
+  "protocol_commit": "c8d561ececa7a2ed205eb7b5a1ed42cefe19ffbb",
+  "timerange": "20260101-20260801",
+  "status": "complete",
+  "integrity_gate_passed": true,
+  "design": {
+    "assets": [
+      "BTC/USDT:USDT",
+      "ETH/USDT:USDT",
+      "PAXG/USDT:USDT"
+    ],
+    "timeframe": "15m",
+    "target_horizons_minutes": [
+      15,
+      60
+    ],
+    "training_days": 90,
+    "evaluation_step_days": 30,
+    "training_windows_per_case": 8,
+    "effective_n": {
+      "native_15m": 8639,
+      "matched_1h_control": 8636
+    },
+    "maximum_predictors": 431950,
+    "maximum_pn_ratio": 50.0,
+    "rff_cases": 78,
+    "baseline_cases": 39,
+    "rolling_fits": 936,
+    "cost_rows": 522
+  },
+  "prediction": {
+    "double_descent_shape_replicated_assets": 3,
+    "double_descent_shape_tested_assets": 3,
+    "useful_second_descent_assets": 0,
+    "rff_cases_beating_zero_mse": 0,
+    "hac_fdr_nonzero_cases": 108,
+    "hac_fdr_significantly_better_than_zero": 0,
+    "hac_fdr_significantly_worse_than_zero": 105,
+    "best_simple_forecast_all_asset_horizon_cells": "zero_return",
+    "best_rff_mse_over_zero": {
+      "btc_native_15m": 2.41248892956324,
+      "eth_native_15m": 2.3517032745827007,
+      "gold_native_15m": 3.685228679550937,
+      "btc_matched_1h": 3.531981852315489,
+      "eth_matched_1h": 3.2058378002765346,
+      "gold_matched_1h": 4.977185840985262
+    },
+    "pn50_mse_over_zero_primary_seed_ranges": {
+      "btc_native_15m": [
+        99.04919136750864,
+        101.94922493675615
+      ],
+      "eth_native_15m": [
+        84.2137004797023,
+        88.31536369419436
+      ],
+      "gold_native_15m": [
+        171.87631643450493,
+        174.76907620788035
+      ]
+    }
+  },
+  "economics": {
+    "rff_cases_profitable_at_optimistic_cost": 0,
+    "rff_cases_profitable_at_reference_cost": 0,
+    "reference_cost_median_rff_return": -0.971000958179318,
+    "reference_cost_best_rff_return": -0.910671240678,
+    "reference_cost_median_rff_trade_count": 1799,
+    "only_positive_costed_case": {
+      "model": "historical_mean",
+      "asset": "PAXG/USDT:USDT",
+      "trade_count": 2,
+      "minimum_trade_gate_passed": false
+    }
+  },
+  "compute": {
+    "summed_case_wall_seconds": 22063.330731,
+    "observed_command_wall_seconds": 22092.9,
+    "maximum_peak_vram_mib": 3945.03564453125,
+    "gpu": "NVIDIA GeForce RTX 5080 Laptop GPU"
+  },
+  "decision": {
+    "double_descent_geometry": "supported",
+    "useful_benign_overfitting": "not_supported",
+    "financial_predictability": "not_supported",
+    "costed_profitability": "not_supported",
+    "live_deployment": "reject"
+  },
+  "limitations": [
+    "The holdout covers seven complete months of 2026, not a full calendar year.",
+    "PAXG perpetual is a tokenized-gold proxy rather than XAU spot or COMEX futures.",
+    "All instruments use Binance data and the execution model has no order-book market impact.",
+    "The strict Phase 19 numerical gate failed one maximum-absolute CPU/CUDA tolerance near P/N=1, so interpolation amplitudes remain numerically qualified."
+  ]
+}
